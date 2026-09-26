@@ -231,16 +231,13 @@ impl SecondaryMarket {
     /// **Parameters:**
     /// - `buyer` — The address purchasing the position (must authenticate).
     /// - `invoice_id` — The invoice ID of the pool.
-    /// - `seller` — The address that listed the position.
+    /// - `seller` — The address of the current position holder / lister.
     ///
     /// **Errors:**
     /// - `SecondaryMarketError::ProtocolPaused` — Contract is paused.
-    /// - `SecondaryMarketError::ListingNotFound` — No active listing.
-    /// - `SecondaryMarketError::PositionNotFound` — Seller no longer holds the position.
+    /// - `SecondaryMarketError::ListingNotFound` — No active listing exists.
+    /// - `SecondaryMarketError::SameAddress` — Buyer is the seller.
     /// - `SecondaryMarketError::PoolAlreadyClosed` — Pool is closed.
-    ///
-    /// **Security:** Both buyer and seller must authenticate (CEI pattern).
-    /// State is updated before any token transfer.
     pub fn buy_position(
         env: Env,
         buyer: Address,
@@ -248,8 +245,11 @@ impl SecondaryMarket {
         seller: Address,
     ) -> Result<(), SecondaryMarketError> {
         buyer.require_auth();
-        seller.require_auth();
         require_not_paused(&env)?;
+
+        if buyer == seller {
+            return Err(SecondaryMarketError::SameAddress);
+        }
 
         let listing: PositionSaleOffer = env
             .storage()
@@ -262,9 +262,18 @@ impl SecondaryMarket {
             .persistent()
             .get(&DataKey::FinancingPool)
             .ok_or(SecondaryMarketError::NotInitialized)?;
+        let treasury: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Treasury)
+            .ok_or(SecondaryMarketError::NotInitialized)?;
+        let fee_bps: u32 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ProtocolFeeBps)
+            .unwrap_or(DEFAULT_PROTOCOL_FEE_BPS);
 
         let pool_client = kora_financing_pool::FinancingPoolContractClient::new(&env, &financing_pool);
-
         let pool: Pool = pool_client
             .get_pool(&invoice_id)
             .map_err(|_| SecondaryMarketError::PositionNotFound)?;
@@ -272,132 +281,48 @@ impl SecondaryMarket {
             return Err(SecondaryMarketError::PoolAlreadyClosed);
         }
 
-        // Verify seller still holds the position.
-        let position: Position = pool_client.get_position(&invoice_id, &seller);
-        if position.investor != seller {
-            return Err(SecondaryMarketError::PositionNotFound);
-        }
-
-        let price = listing.price;
-        let fee_bps: u32 = env
-            .storage()
-            .persistent()
-            .get(&DataKey::ProtocolFeeBps)
-            .unwrap_or(DEFAULT_PROTOCOL_FEE_BPS);
-        let fee = bps_of(price, fee_bps)?;
-        let seller_receives = safe_sub(price, fee)?;
-
-        // CEI: remove listing before any external call.
+        // Checks-effects-interactions: clear the listing before external calls.
         env.storage()
             .persistent()
             .remove(&DataKey::Listing(invoice_id, seller.clone()));
 
-        // Transfer tokens from buyer.
+        // Settle payment: fee to treasury, remainder to seller.
+        let fee = bps_of(listing.price, fee_bps)?;
+        let seller_proceeds = safe_sub(listing.price, fee)?;
+
         let token_client = soroban_sdk::token::Client::new(&env, &listing.token);
-        token_client.transfer(&buyer, &env.current_contract_address(), &price);
+        token_client.transfer(&buyer, &treasury, &fee);
+        token_client.transfer(&buyer, &seller, &seller_proceeds);
 
-        // Send net amount to seller.
-        token_client.transfer(&env.current_contract_address(), &seller, &seller_receives);
+        // Atomically reassign position ownership in the financing pool.
+        pool_client.transfer_position(&invoice_id, &seller, &buyer);
 
-        // Send protocol fee to treasury.
-        if fee > 0 {
-            let treasury: Address = env
-                .storage()
-                .persistent()
-                .get(&DataKey::Treasury)
-                .unwrap();
-            token_client.transfer(&env.current_contract_address(), &treasury, &fee);
-            events::fee_collected(&env, &buyer, invoice_id, fee, &listing.token);
-        }
-
-        // Transfer position ownership on the financing pool.
-        pool_client
-            .transfer_position(&invoice_id, &seller, &buyer)
-            .map_err(|_| SecondaryMarketError::PositionNotFound)?;
-
-        events::position_sold(&env, invoice_id, &seller, &buyer, price);
+        events::position_sold(&env, invoice_id, &seller, &buyer, listing.price);
         Ok(())
     }
 
-    /// Cancels an active listing. Only the seller can cancel.
+    /// Cancels an active listing. Only the seller may cancel.
     ///
     /// **Parameters:**
-    /// - `seller` — The address that listed the position (must authenticate).
+    /// - `seller` — The address that created the listing (must authenticate).
     /// - `invoice_id` — The invoice ID of the pool.
     ///
     /// **Errors:**
-    /// - `SecondaryMarketError::ProtocolPaused` — Contract is paused.
-    /// - `SecondaryMarketError::ListingNotFound` — No active listing.
+    /// - `SecondaryMarketError::ListingNotFound` — No active listing exists.
     pub fn cancel_listing(
         env: Env,
         seller: Address,
         invoice_id: u64,
     ) -> Result<(), SecondaryMarketError> {
         seller.require_auth();
-        require_not_paused(&env)?;
 
-        if !env
-            .storage()
-            .persistent()
-            .has(&DataKey::Listing(invoice_id, seller.clone()))
-        {
+        let key = DataKey::Listing(invoice_id, seller.clone());
+        if !env.storage().persistent().has(&key) {
             return Err(SecondaryMarketError::ListingNotFound);
         }
+        env.storage().persistent().remove(&key);
 
-        env.storage()
-            .persistent()
-            .remove(&DataKey::Listing(invoice_id, seller.clone()));
-
-        events::listing_cancelled(&env, invoice_id, &seller);
+        events::position_listing_cancelled(&env, invoice_id, &seller);
         Ok(())
-    }
-
-    /// Returns the active listing for a seller, if any.
-    ///
-    /// **Security:** Read-only view.
-    pub fn get_listing(env: Env, invoice_id: u64, seller: Address) -> Option<PositionSaleOffer> {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Listing(invoice_id, seller))
-    }
-
-    /// Returns the protocol fee in basis points.
-    pub fn get_protocol_fee_bps(env: Env) -> u32 {
-        env.storage()
-            .persistent()
-            .get(&DataKey::ProtocolFeeBps)
-            .unwrap_or(DEFAULT_PROTOCOL_FEE_BPS)
-    }
-
-    /// Returns the admin address.
-    pub fn get_admin(env: Env) -> Address {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Admin)
-            .unwrap()
-    }
-
-    /// Returns the financing pool address.
-    pub fn get_financing_pool(env: Env) -> Address {
-        env.storage()
-            .persistent()
-            .get(&DataKey::FinancingPool)
-            .unwrap()
-    }
-
-    /// Returns the treasury address.
-    pub fn get_treasury(env: Env) -> Address {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Treasury)
-            .unwrap()
-    }
-
-    /// Returns whether the contract is paused.
-    pub fn is_paused(env: Env) -> bool {
-        env.storage()
-            .persistent()
-            .get(&DataKey::Paused)
-            .unwrap_or(false)
     }
 }
