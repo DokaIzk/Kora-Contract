@@ -173,198 +173,56 @@ match topic {
 Events use Soroban's `symbol_short!()` macro, which is more efficient than `Symbol::new()` for constants. All topic symbols are 8-14 characters and fit comfortably within the 32-character limit.
 
 For backwards compatibility with deployed contracts, the internal event topic names remain unchanged—only new deployments follow this convention.
-# Kora Protocol — Event Schema Reference
-
-This document is the canonical reference for every on-chain event published by the
-Kora protocol contracts. Indexer authors and off-chain reconciliation tooling should
-treat this file as the source of truth.
 
 ---
 
-## Canonical Schema Convention
+## Analytics Data Warehouse (#757)
 
-Every event follows the ordering convention:
+The `services/analytics/` pipeline consumes the indexer database and writes
+time-bucketed summary tables. This section documents the exact computation
+formula for each metric so the warehouse output is reproducible and auditable.
 
-```
-(actor: Address, subject: ..., amount: i128, ledger_timestamp: u64)
-```
+### Source events
 
-| Position | Field | Description |
-|----------|-------|-------------|
-| 1 | **actor** | The `Address` initiating the action (SME, investor, admin, contract) |
-| 2 | **subject** | What is being acted on — typically an `invoice_id: u64` or `token: Address` |
-| 3 | **amount / data** | Monetary value in stroops, or relevant scalar data (0 when not applicable) |
-| last | **timestamp** | `env.ledger().timestamp()` — always present for deterministic indexing |
+All metrics are derived from the events in the registry above. The pipeline
+reads the indexer's normalized event table (one row per emitted event, keyed by
+`(ledger, tx_hash, event_index)`) and never mutates it.
 
-Events with more than three data fields extend the tuple while preserving actor-first,
-timestamp-last ordering.
+### Time bucketing
 
-System events (where there is no single initiating actor — e.g. `late_penalty_applied`,
-`multisig_configured`) omit the actor and start with the relevant subject or scalar.
+Every summary table is keyed by `(bucket_start, bucket_size)` where
+`bucket_size` is one of `hour`, `day`, `week`. Buckets are aligned to UTC
+epoch boundaries. A metric value for a bucket is computed from **all** events
+whose `timestamp` falls in `[bucket_start, bucket_start + bucket_size)`.
 
----
+### Metric definitions
 
-## Event Catalog
+| Metric | Table | Formula |
+|---|---|---|
+| **TVL over time** | `analytics_tvl` | `SUM(funded_amount)` over `INV_FUNDED` events in the bucket, minus `SUM(amount)` over `INV_REPAID` and `PROTOCOL_REFUND_CLAIMED` events in the bucket, plus the previous bucket's closing TVL. Defaulted invoices (`INV_DEFAULTED`) are removed from TVL at the bucket in which the default is recorded. |
+| **Default rate by risk tier** | `analytics_default_rate` | For each risk tier `t` and bucket `b`: `defaults(t, b) / funded(t, b)`, where `defaults` counts distinct `invoice_id` in `INV_DEFAULTED` and `funded` counts distinct `invoice_id` in `INV_FUNDED`. Risk tier is taken from the most recent `RISK_SME_SCORE_UPDATED` / `RISK_SME_REGISTERED` event for the invoice's SME at or before the bucket end. |
+| **Funding-to-repayment cycle time** | `analytics_cycle_time` | For each invoice repaid in the bucket: `INV_REPAID.timestamp - INV_FUNDED.timestamp` (seconds). The bucket value is the mean over all such invoices; `p50` and `p95` are also stored. |
+| **Average yield** | `analytics_yield` | `SUM(PROTOCOL_YIELD_DIST.yield_amount) / SUM(INV_FUNDED.funded_amount)` for invoices funded in the bucket, annualized by `365 / mean_cycle_days`. |
+| **SME retention / repeat-usage rate** | `analytics_sme_retention` | `distinct SMEs with >= 2 INV_CREATED events in the trailing 90 days / distinct SMEs with >= 1 INV_CREATED event in the trailing 90 days`, evaluated at each bucket end. |
 
-### Invoice Events
+### Late-arriving and backfilled data
 
-| Topic Symbol | Function | Payload | Emitter |
-|---|---|---|---|
-| `INV_CRT` | `invoice_created` | `(sme, invoice_id, amount, currency, timestamp)` | `invoice_nft` |
-| `INV_LISTED` | `invoice_listed` | `(seller, invoice_id, asking_price, currency, timestamp)` | `marketplace`, `invoice_nft` |
-| `INV_FUNDED` | `invoice_funded` | `(investor, invoice_id, funded_amount, currency, timestamp)` | `marketplace`, `invoice_nft` |
-| `INV_RPD` | `invoice_repaid` | `(sme, invoice_id, amount, currency, timestamp)` | `invoice_nft` |
-| `INV_DFT` | `invoice_defaulted` | `(actor, invoice_id, amount, currency, timestamp)` | `invoice_nft`, `financing_pool` |
-| `INV_AMD` | `invoice_amended` | `(invoice_id, sme, currency, timestamp)` | `invoice_nft` |
-| `INV_WTH` | `invoice_withdrawn` | `(invoice_id, sme, currency, timestamp)` | `invoice_nft` |
+Indexer data may arrive out of order (backfills, reorgs). The pipeline must
+**recompute** affected buckets rather than append:
 
-> **Note on `INV_DFT`:** The `actor` field is the admin address that triggered the
-> default marking — it is not the SME. In `invoice_nft`, the caller is validated as
-> the contract admin; in `financing_pool`, it is the admin address passed to `mark_default`.
+1. Each indexer event row carries the `ledger` at which it was observed.
+2. The pipeline tracks a high-water mark per source table.
+3. When a backfill inserts events with `ledger` below the high-water mark, the
+   pipeline determines the earliest affected `bucket_start` and recomputes
+   every bucket from there forward (idempotent upsert keyed by
+   `(metric, bucket_start, bucket_size, dimensions)`).
+4. Gaps in event history are tolerated: a bucket with no events yields a
+   `NULL`/absent row rather than a zero, so downstream consumers can
+distinguish "no activity" from "zero activity".
 
-> **Breaking schema change (#420):** `invoice_defaulted` gained an `amount` field
-> (previously omitted, unlike every sibling invoice event), and all seven
-> invoice-lifecycle events (`invoice_created`, `invoice_listed`, `invoice_funded`,
-> `invoice_repaid`, `invoice_amended`, `invoice_withdrawn`, `invoice_defaulted`) gained
-> a `currency` field so the accompanying `amount` can be interpreted without a separate
-> `get_invoice` call. Existing off-chain indexers that decode these event tuples by
-> fixed position/arity must be updated to match the new schemas above.
+### Query API
 
----
-
-### Repayment Events
-
-| Topic Symbol | Function | Payload | Emitter |
-|---|---|---|---|
-| `REPAY` | `repayment_made` | `(payer, invoice_id, amount, timestamp)` | `financing_pool` |
-| `YIELD` | `yield_distributed` | `(investor, invoice_id, yield_amount, timestamp)` | `financing_pool` |
-| `LATE_PEN` | `late_penalty_applied` | `(invoice_id, penalty_amount, total_owed, timestamp)` | `financing_pool` |
-
-> **`LATE_PEN`** is a system event with no actor. `invoice_id` identifies which pool
-> the penalty applies to, `penalty_amount` is the incremental penalty, and `total_owed`
-> is the new total the SME owes.
-
----
-
-### Marketplace Events
-
-| Topic Symbol | Function | Payload | Emitter |
-|---|---|---|---|
-| `LST_CXL` | `listing_cancelled` | `(seller, invoice_id, timestamp)` | `marketplace` |
-| `LST_EXP` | `listing_expired` | `(seller, invoice_id, timestamp)` | `marketplace` |
-| `REFUND` | `refund_claimed` | `(investor, invoice_id, amount, timestamp)` | `marketplace` |
-
----
-
-### Fee Events
-
-| Topic Symbol | Function | Payload | Emitter |
-|---|---|---|---|
-| `FEE_COL` | `fee_collected` | `(investor, invoice_id, fee_amount, token, timestamp)` | `marketplace`, `treasury` |
-| `FEE_WTH` | `fee_withdrawn` | `(admin, token, amount, timestamp)` | `treasury` |
-| `EMRG_WTH` | `emergency_withdrawn` | `(admin, token, amount, timestamp)` | `treasury` |
-| `FEE_UPD` | `fee_rate_updated` | `(admin, old_bps, new_bps, timestamp)` | `treasury`, `marketplace` |
-| `TRES_INI` | `treasury_initialized` | `(admin, fee_bps, timestamp)` | `treasury` |
-
-> **`FEE_COL` from treasury:** When `treasury.collect_fee` emits this event, the
-> `investor` field is set to the treasury contract address (a sentinel indicating
-> a protocol-internal accounting deposit rather than a direct investor action).
-> Off-chain indexers can distinguish by checking whether `investor == treasury_contract`.
-
----
-
-### Protocol / Admin Events
-
-| Topic Symbol | Function | Payload | Emitter |
-|---|---|---|---|
-| `PAUSED` | `protocol_paused` | `(admin, timestamp)` | `access_control` |
-| `UNPAUSED` | `protocol_unpaused` | `(admin, timestamp)` | `access_control` |
-| `TOK_WL` | `token_whitelisted` | `(admin, token, timestamp)` | `marketplace`, `treasury` |
-| `TOK_UNWL` | `token_whitelist_removed` | `(admin, token, timestamp)` | `marketplace` |
-| `ADM_TRF` | `admin_transferred` | `(current_admin, new_admin, timestamp)` | `access_control`, `risk_registry` |
-| `ROL_GRT` | `role_granted` | `(admin, target, timestamp)` | `access_control` |
-| `ROL_RVK` | `role_revoked` | `(admin, target, timestamp)` | `access_control` |
-
----
-
-### Financing Pool Events
-
-| Topic Symbol | Function | Payload | Emitter |
-|---|---|---|---|
-| `POOL_OPN` | `pool_opened` | `(marketplace, invoice_id, token, face_value, timestamp)` | `financing_pool` |
-| `POS_RECD` | `position_recorded` | `(admin, invoice_id, investor, contributed, share_bps, timestamp)` | `financing_pool` |
-| `NET_SETTL` | `net_settled` | `(payer, invoice_ids, total_amount, timestamp)` | `financing_pool` |
-
-> **`NET_SETTL`** (#588): emitted once per `net_settle` call after all per-pool `REPAY`
-> events have been emitted. `invoice_ids` is a `Vec<u64>` of all invoices included in the
-> netting. Indexers should use the accompanying `REPAY` events for per-invoice amounts.
-
----
-
-### Risk Registry Events
-
-| Topic Symbol | Function | Payload | Emitter |
-|---|---|---|---|
-| `REG_INI` | `registry_initialized` | `(admin, invoice_nft, timestamp)` | `risk_registry` |
-| `VRF_ADD` | `verifier_added` | `(admin, verifier, timestamp)` | `risk_registry` |
-| `VRF_REM` | `verifier_removed` | `(admin, verifier, timestamp)` | `risk_registry` |
-| `SME_REG` | `sme_registered` | `(verifier, sme, risk_score, timestamp)` | `risk_registry` |
-| `SME_UPD` | `sme_score_updated` | `(verifier, sme, new_score, timestamp)` | `risk_registry` |
-| `SME_DFT` | `sme_default_recorded` | `(admin, sme, total_defaults, timestamp)` | `risk_registry` |
-| `SME_INV` | `sme_invoice_count_incremented` | `(sme, new_total_invoices, timestamp)` | `risk_registry` |
-| `DBT_SCR` | `debtor_score_set` | `(verifier, debtor_hash, score, timestamp)` | `risk_registry` |
-
----
-
-### Upgrade Events
-
-| Topic Symbol | Function | Payload | Emitter |
-|---|---|---|---|
-| `UPG_PROP` | `upgrade_proposed` | `(admin, wasm_hash, timestamp)` | all contracts |
-| `UPG_EXEC` | `upgrade_executed` | `(admin, wasm_hash, timestamp)` | all contracts |
-
----
-
-### Multisig Events
-
-| Topic Symbol | Function | Payload | Emitter |
-|---|---|---|---|
-| `MS_CFG` | `multisig_configured` | `(threshold, signer_count, timestamp)` | `access_control` |
-| `MS_PROP` | `action_proposed` | `(proposal_id, proposer, timestamp)` | `access_control` |
-| `MS_APPR` | `action_approved` | `(proposal_id, approver, approval_count, timestamp)` | `access_control` |
-| `MS_EXEC` | `action_executed` | `(proposal_id, executor, timestamp)` | `access_control` |
-
----
-
-## Price Oracle Events (#589)
-
-| Topic Symbol | Function | Payload | Emitter |
-|---|---|---|---|
-| `PEG_DEV` | *(inline — no shared helper)* | `(base, quote, submitted_price, expected_ratio, deviation, timestamp)` | `price_oracle` |
-
-> **`PEG_DEV`** is emitted directly from `set_price` (not via the shared `events` module)
-> when a feeder submits a price for a pair with an active `PegConfig` and the submitted
-> price deviates from `expected_ratio` by more than `tolerance_bps`.
-> If `auto_flag` is `true` in the `PegConfig`, the pair is also flagged which blocks
-> further `set_price` submissions until admin calls `clear_peg_flag`.
-> `submitted_price`, `expected_ratio`, and `deviation` use 1e7 scaling (same as all
-> other prices in the oracle).
-
-> **Note:** `PEG_DEV` events do **not** carry the `SCHEMA_V` versioning topic because
-> they are emitted by the standalone `price_oracle` contract which does not depend on
-> `kora-shared`. Indexers should match them by the single-element topic `("PEG_DEV",)`.
-
----
-
-## Indexing Notes
-
-- All topics (except `PEG_DEV`) are published as a versioned triple: `("SCHEMA_V", topic_symbol, schema_version: u32)`.
-- `ledger_timestamp` is a `u64` Unix timestamp in seconds.
-- `invoice_id` is a `u64` auto-incrementing integer starting at 1.
-- `share_bps` is a `u32` in basis points (10 000 = 100 %).
-- `fee_bps`, `old_bps`, `new_bps` are `u32` basis-point values (max 10 000).
-- `risk_score` / `new_score` are `u32` values in the range 0–100.
-- `debtor_hash` is `Bytes` (SHA-256 of off-chain PII — the raw bytes, not hex-encoded).
-- `wasm_hash` is `BytesN<32>`.
-- All monetary amounts (`amount`, `face_value`, `fee_amount`, etc.) are `i128` in stroops
-  (7 decimal places for USDC/EURC on Stellar).
+The aggregated tables are exposed through an internal read-only query API
+(`GET /internal/analytics/{metric}?from=&to=&bucket=&tier=`) consumed by the
+frontend analytics dashboard (tracked separately). The API performs no
+aggregation itself; it only filters and returns pre-computed rows.
