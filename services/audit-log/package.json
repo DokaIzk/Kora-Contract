@@ -1,0 +1,35 @@
+{
+  "name": "@kora/audit-log",
+  "version": "1.0.0",
+  "description": "Kora Protocol — Off-chain tamper-evident audit log with cryptographic hash chaining",
+  "main": "dist/index.js",
+  "types": "dist/index.d.ts",
+  "scripts": {
+    "build": "tsc",
+    "start": "node dist/index.js",
+    "dev": "ts-node src/index.ts",
+    "verify": "node dist/verify.js",
+    "test": "jest --coverage --coverageThreshold='{\"global\":{\"lines\":90,\"branches\":90,\"functions\":90,\"statements\":90}}'",
+    "lint": "eslint src tests --ext .ts"
+  },
+  "dependencies": {
+    "better-sqlite3": "9.4.3",
+    "dotenv": "16.4.5",
+    "pino": "9.1.0",
+    "pino-pretty": "11.0.0"
+  },
+  "devDependencies": {
+    "@types/better-sqlite3": "7.6.10",
+    "@types/jest": "29.5.12",
+    "@types/node": "20.12.12",
+    "jest": "29.7.0",
+    "ts-jest": "29.1.4",
+    "typescript": "5.4.5"
+  },
+  "jest": {
+    "preset": "ts-jest",
+    "testEnvironment": "node",
+    "testMatch": ["**/tests/**/*.test.ts"],
+    "collectCoverageFrom": ["src/**/*.ts", "!src/index.ts"]
+  }
+}
