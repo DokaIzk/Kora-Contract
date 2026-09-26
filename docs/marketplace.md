@@ -55,7 +55,7 @@ list_invoice(
 ) -> Result<(), KoraError>
 ```
 
-SME lists an invoice NFT for financing. Requires `seller` authentication. The asking price must be less than face value (a discount must exist for investor yield).
+SME lists an invoice NFT for financing. Requires `seller` authentication. The asking price must be less than face value by at least the configured minimum discount (a meaningful discount must exist for investor yield).
 
 **Parameters:**
 - `seller` — SME address (must authenticate)
@@ -64,16 +64,30 @@ SME lists an invoice NFT for financing. Requires `seller` authentication. The as
 - `face_value` — Nominal value of the underlying invoice
 - `token` — Whitelisted stablecoin address
 - `funding_deadline` — Unix timestamp; must be in the future
+- `referrer` — Optional referrer address credited a share of the collected fee
 
 **State Changes:**
 - Persists a Listing struct with status `active` and `funded_amount = 0`
 - Calls `invoice_nft.set_listed()` to transition invoice status
 
 **Errors:**
-- `InvalidAmount` — asking_price or face_value <= 0, or asking_price >= face_value
+- `InvalidAmount` — asking_price or face_value <= 0, asking_price >= face_value, or the discount (face_value - asking_price) is below the minimum discount requirement
 - `InvalidDueDate` — funding_deadline in the past
 - `TokenNotWhitelisted` — token not whitelisted by admin
 - `InvoiceAlreadyExists` — listing already exists for this invoice_id
+
+**Minimum Discount:**
+
+To keep listings economically meaningful for investors (and to prevent fee-arbitrage or spam listings priced a stroop below face value), `list_invoice` enforces a minimum discount, expressed in basis points of `face_value`:
+
+```
+min_discount = face_value × min_discount_bps / 10_000
+required: face_value - asking_price >= min_discount
+```
+
+- Defaults to `10` bps (0.1%) if never configured.
+- Configurable by the admin via `set_min_discount_bps(admin, min_discount_bps)` (0–10,000 bps; validated with the same range as `fee_bps`).
+- Read the current value with `get_min_discount_bps()`.
 
 ### fund_invoice
 
@@ -115,7 +129,10 @@ gross_amount (from investor)
 - `FundingDeadlinePassed` — current time > funding_deadline
 - `InvalidAmount` — amount <= 0
 - `ExceedsFundingTarget` — amount would exceed asking_price
+- `ContributionBelowMinimum` — amount is below the configured minimum contribution floor and does not exactly complete the remaining funding target (#451)
 - `ArithmeticOverflow` — fee or net calculation overflowed
+
+**Minimum contribution floor (#451):** contributions below `get_min_contribution()` (admin-configurable via `set_min_contribution`, defaults to 10_000_000 — ~1 unit for a 7-decimal stablecoin) are rejected, unless `amount` exactly equals the listing's remaining funding target. This closes off cheap dust-contribution storage-griefing of a listing: without a floor, an attacker could create unbounded distinct `Contribution(invoice_id, investor)` entries at near-zero cost by submitting many tiny contributions from many distinct addresses.
 
 ### cancel_listing
 
@@ -277,4 +294,46 @@ Listings are stored in persistent storage with listing ID as key. Each listing i
 - **Initialize:** Set up marketplace with pointers to other contracts
 - **Whitelist Tokens:** Add tokens that SMEs and investors can use
 - **Pause Protocol:** Via access_control contract (pauses state-mutating operations)
-- **Set Fees:** Update the marketplace fee rate (future enhancement)
+- **Set Fees:** Update the marketplace fee rate
+
+## Authorization Model
+
+Privileged marketplace calls are gated on the multisig signer set configured in
+the `access_control` contract, not on a single admin key alone.
+
+Affected entrypoints: `set_fee_bps` / `update_fee_bps`, `set_tier_fee_bps`,
+`set_referrer_split_bps`, `whitelist_token`, `remove_token_whitelist`,
+`propose_upgrade`, and `execute_upgrade`.
+
+Two authorization paths exist:
+
+- **Direct admin call.** Allowed only when `access_control` has no multisig
+  configured, or has a 1-of-1 multisig. This is the backward-compatible path for
+  low-risk chains and existing deployments. When a quorum above 1 is configured,
+  these calls fail with `MultisigApprovalRequired`.
+- **Multisig quorum.** A configured signer calls `propose_admin_action(proposer,
+  action)` with a `MarketplaceAction`, other signers call
+  `approve_admin_action(approver, proposal_id)`, and once approvals reach the
+  configured threshold any signer calls `execute_admin_action(executor,
+  proposal_id)`. The proposal is marked executed before dispatch, so it cannot
+  be replayed.
+
+`is_multisig_required()` reports which path is currently in force, and
+`get_admin_proposal(proposal_id)` returns a proposal's action, approvals, and
+executed flag.
+
+`MarketplaceAction` variants: `SetFeeBps`, `SetReferrerSplitBps`,
+`SetTierFeeBps`, `WhitelistToken`, `RemoveTokenWhitelist`, `ProposeUpgrade`,
+`ExecuteUpgrade`.
+
+Relevant errors:
+
+| Error | Meaning |
+|---|---|
+| `MultisigApprovalRequired` | Direct admin call attempted while a quorum above 1 is configured |
+| `MultisigNotConfigured` | Proposal flow used with no multisig configured on access_control |
+| `NotMultisigSigner` | Caller is not in the configured signer set |
+| `GovernanceThresholdNotMet` | Approvals are below the configured threshold |
+| `AlreadyVoted` | Signer has already approved this proposal |
+| `ParameterProposalNotFound` | No proposal exists with the given id |
+| `ParameterProposalAlreadyExecuted` | Proposal has already been executed |

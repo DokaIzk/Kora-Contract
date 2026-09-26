@@ -2,6 +2,66 @@
 
 This document defines the standardized event topic naming convention across all Kora contracts, ensuring consistent event identification for indexers, dashboards, and monitoring systems.
 
+---
+
+## Schema Versioning (#583)
+
+All Kora on-chain events carry an explicit schema version so off-chain indexers can
+detect contract upgrades that alter event shapes without silently breaking.
+
+### Topic layout
+
+Every event is published with **three** Soroban topics:
+
+```
+topics: ("SCHEMA_V", <event_topic>, <version: u32>)
+data:   <event payload tuple>
+```
+
+The first topic is always the literal `SCHEMA_V` sentinel. The second is the
+per-event topic symbol (e.g. `INV_CRT`). The third is the schema version number
+as a `u32`.
+
+The current schema version is defined in `contracts/shared/src/events.rs`:
+
+```rust
+pub const EVENT_SCHEMA_VERSION: u32 = 1;
+```
+
+### Versioning policy
+
+| Change type | Action |
+|---|---|
+| **Additive** — new optional field appended to the end of an existing event tuple | Bump `EVENT_SCHEMA_VERSION` (minor intent); document in this file |
+| **Breaking** — field removed, type changed, ordering altered, or topic symbol renamed | Bump `EVENT_SCHEMA_VERSION`; add a migration note below; update all payload tables |
+
+Out of scope: migrating historical events that were already emitted on-chain before versioning
+was introduced. Those events carry no `SCHEMA_V` topic and indexers should treat their
+absence as "pre-v1".
+
+### Changelog
+
+| Version | Change | Related issue |
+|---|---|---|
+| 1 | Initial versioned release — `SCHEMA_V` topic added to every event | #583 |
+
+### Indexer integration
+
+```rust
+// Filter events that belong to the current schema version
+env.events().get_events()
+    .iter()
+    .filter(|e| {
+        e.topics.get(0) == Some(Symbol::new(env, "SCHEMA_V")) &&
+        e.topics.get(2) == Some(Val::from(kora_shared::events::EVENT_SCHEMA_VERSION))
+    })
+    .for_each(|e| { /* process e.topics[1] for event type */ });
+```
+
+Pre-v1 events (no `SCHEMA_V` topic) can be identified by their single-element topic tuple.
+
+---
+
 ## Naming Pattern
 
 All event topic symbols follow the pattern:
@@ -150,15 +210,25 @@ System events (where there is no single initiating actor — e.g. `late_penalty_
 
 | Topic Symbol | Function | Payload | Emitter |
 |---|---|---|---|
-| `INV_CRT` | `invoice_created` | `(sme, invoice_id, amount, timestamp)` | `invoice_nft` |
-| `INV_LST` | `invoice_listed` | `(seller, invoice_id, asking_price, timestamp)` | `marketplace`, `invoice_nft` |
-| `INV_FND` | `invoice_funded` | `(investor, invoice_id, funded_amount, timestamp)` | `marketplace`, `invoice_nft` |
-| `INV_RPD` | `invoice_repaid` | `(sme, invoice_id, amount, timestamp)` | `invoice_nft` |
-| `INV_DFT` | `invoice_defaulted` | `(actor, invoice_id, timestamp)` | `invoice_nft`, `financing_pool` |
+| `INV_CRT` | `invoice_created` | `(sme, invoice_id, amount, currency, timestamp)` | `invoice_nft` |
+| `INV_LISTED` | `invoice_listed` | `(seller, invoice_id, asking_price, currency, timestamp)` | `marketplace`, `invoice_nft` |
+| `INV_FUNDED` | `invoice_funded` | `(investor, invoice_id, funded_amount, currency, timestamp)` | `marketplace`, `invoice_nft` |
+| `INV_RPD` | `invoice_repaid` | `(sme, invoice_id, amount, currency, timestamp)` | `invoice_nft` |
+| `INV_DFT` | `invoice_defaulted` | `(actor, invoice_id, amount, currency, timestamp)` | `invoice_nft`, `financing_pool` |
+| `INV_AMD` | `invoice_amended` | `(invoice_id, sme, currency, timestamp)` | `invoice_nft` |
+| `INV_WTH` | `invoice_withdrawn` | `(invoice_id, sme, currency, timestamp)` | `invoice_nft` |
 
 > **Note on `INV_DFT`:** The `actor` field is the admin address that triggered the
 > default marking — it is not the SME. In `invoice_nft`, the caller is validated as
 > the contract admin; in `financing_pool`, it is the admin address passed to `mark_default`.
+
+> **Breaking schema change (#420):** `invoice_defaulted` gained an `amount` field
+> (previously omitted, unlike every sibling invoice event), and all seven
+> invoice-lifecycle events (`invoice_created`, `invoice_listed`, `invoice_funded`,
+> `invoice_repaid`, `invoice_amended`, `invoice_withdrawn`, `invoice_defaulted`) gained
+> a `currency` field so the accompanying `amount` can be interpreted without a separate
+> `get_invoice` call. Existing off-chain indexers that decode these event tuples by
+> fixed position/arity must be updated to match the new schemas above.
 
 ---
 
@@ -210,6 +280,7 @@ System events (where there is no single initiating actor — e.g. `late_penalty_
 | `PAUSED` | `protocol_paused` | `(admin, timestamp)` | `access_control` |
 | `UNPAUSED` | `protocol_unpaused` | `(admin, timestamp)` | `access_control` |
 | `TOK_WL` | `token_whitelisted` | `(admin, token, timestamp)` | `marketplace`, `treasury` |
+| `TOK_UNWL` | `token_whitelist_removed` | `(admin, token, timestamp)` | `marketplace` |
 | `ADM_TRF` | `admin_transferred` | `(current_admin, new_admin, timestamp)` | `access_control`, `risk_registry` |
 | `ROL_GRT` | `role_granted` | `(admin, target, timestamp)` | `access_control` |
 | `ROL_RVK` | `role_revoked` | `(admin, target, timestamp)` | `access_control` |
@@ -220,8 +291,13 @@ System events (where there is no single initiating actor — e.g. `late_penalty_
 
 | Topic Symbol | Function | Payload | Emitter |
 |---|---|---|---|
-| `PLOP` | `pool_opened` | `(marketplace, invoice_id, token, face_value, timestamp)` | `financing_pool` |
-| `POSR` | `position_recorded` | `(admin, invoice_id, investor, contributed, share_bps, timestamp)` | `financing_pool` |
+| `POOL_OPN` | `pool_opened` | `(marketplace, invoice_id, token, face_value, timestamp)` | `financing_pool` |
+| `POS_RECD` | `position_recorded` | `(admin, invoice_id, investor, contributed, share_bps, timestamp)` | `financing_pool` |
+| `NET_SETTL` | `net_settled` | `(payer, invoice_ids, total_amount, timestamp)` | `financing_pool` |
+
+> **`NET_SETTL`** (#588): emitted once per `net_settle` call after all per-pool `REPAY`
+> events have been emitted. `invoice_ids` is a `Vec<u64>` of all invoices included in the
+> netting. Indexers should use the accompanying `REPAY` events for per-invoice amounts.
 
 ---
 
@@ -260,9 +336,29 @@ System events (where there is no single initiating actor — e.g. `late_penalty_
 
 ---
 
+## Price Oracle Events (#589)
+
+| Topic Symbol | Function | Payload | Emitter |
+|---|---|---|---|
+| `PEG_DEV` | *(inline — no shared helper)* | `(base, quote, submitted_price, expected_ratio, deviation, timestamp)` | `price_oracle` |
+
+> **`PEG_DEV`** is emitted directly from `set_price` (not via the shared `events` module)
+> when a feeder submits a price for a pair with an active `PegConfig` and the submitted
+> price deviates from `expected_ratio` by more than `tolerance_bps`.
+> If `auto_flag` is `true` in the `PegConfig`, the pair is also flagged which blocks
+> further `set_price` submissions until admin calls `clear_peg_flag`.
+> `submitted_price`, `expected_ratio`, and `deviation` use 1e7 scaling (same as all
+> other prices in the oracle).
+
+> **Note:** `PEG_DEV` events do **not** carry the `SCHEMA_V` versioning topic because
+> they are emitted by the standalone `price_oracle` contract which does not depend on
+> `kora-shared`. Indexers should match them by the single-element topic `("PEG_DEV",)`.
+
+---
+
 ## Indexing Notes
 
-- All topics are published as a single-element tuple: `(topic_symbol,)`.
+- All topics (except `PEG_DEV`) are published as a versioned triple: `("SCHEMA_V", topic_symbol, schema_version: u32)`.
 - `ledger_timestamp` is a `u64` Unix timestamp in seconds.
 - `invoice_id` is a `u64` auto-incrementing integer starting at 1.
 - `share_bps` is a `u32` in basis points (10 000 = 100 %).

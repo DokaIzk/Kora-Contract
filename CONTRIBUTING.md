@@ -39,6 +39,15 @@ For anything that changes protocol behavior or storage layout, open a discussion
 ---
 
 ## Development Setup
+### Dev Container (Recommended)
+
+This project includes a pre-configured development container with all required dependencies (Rust, Soroban CLI, Node.js).
+
+1. Install [Docker](https://docs.docker.com/get-docker/) and [VS Code](https://code.visualstudio.com/) with the [Dev Containers extension](https://marketplace.visualstudio.com/items?itemName=ms-vscode-remote.remote-containers).
+2. Open the repository in VS Code and click "Reopen in Container" when prompted.
+3. Wait for the post-create script to install `wasm32-unknown-unknown` and `stellar-cli`.
+4. Verify setup: `make build && make test`
+
 
 ```bash
 # 1. Fork and clone
@@ -301,6 +310,14 @@ See [docs/SECURITY.md](docs/SECURITY.md) for the full security policy.
 - All public functions must have a doc comment explaining parameters and failure modes.
 - Storage keys must be defined in a `DataKey` enum using `#[contracttype]`.
 - Events must be emitted via the `kora_shared::events` module — do not publish raw events inline.
+- When adding a new `KoraError` variant reference from a contract crate, add the matching
+  variant to `enum KoraError` in `contracts/shared/src/errors.rs` in the same change. CI runs
+  a consistency check (`cargo run -p kora-xtask --bin check-error-variants`) that fails the
+  build if any crate references a `KoraError::Variant` that isn't declared there — run it
+  locally before opening a PR if you touch error handling:
+  ```bash
+  cargo run -p kora-xtask --bin check-error-variants
+  ```
 
 ### Documentation
 

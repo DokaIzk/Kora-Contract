@@ -10,6 +10,7 @@
 //! - [`errors`] — `KoraError` enum used across all contracts
 //! - [`events`] — Protocol event emission functions (single source of truth)
 //! - [`reentrancy`] — RAII reentrancy guard and low-level lock helpers
+//! - [`timelock`] — Timelocked upgrade proposals shared by all contracts
 //! - [`types`] — Shared data structures (`Invoice`, `Listing`, `Pool`, etc.)
 //! - [`validation`] — Reusable input validation guards and safe arithmetic
 //!
@@ -20,8 +21,10 @@
 //! - Input validation is centralized and consistent across all contracts
 //! - Storage keys use `#[contracttype]` enums for type safety
 
+pub mod audit;
 pub mod errors;
 pub mod events;
 pub mod reentrancy;
+pub mod timelock;
 pub mod types;
 pub mod validation;

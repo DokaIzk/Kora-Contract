@@ -52,6 +52,35 @@ This document describes the technical architecture of the Kora Protocol: how the
 
 ---
 
+## Contract Dependency Graph
+
+The Kora workspace is an acyclic directed graph of crate dependencies. The arrows below
+show **compile-time** (Cargo) dependencies — a contract that calls another at runtime
+also declares it as a `[dependency]` in its `Cargo.toml`.
+
+```
+shared          (library — no runtime deps)
+  ↑
+access_control  (depends on: shared)
+treasury        (depends on: shared)
+risk_registry   (depends on: shared)
+invoice_nft     (depends on: shared, risk_registry)
+financing_pool  (depends on: shared, invoice_nft, risk_registry, treasury)
+marketplace     (depends on: shared, invoice_nft, financing_pool, treasury, risk_registry, access_control)
+```
+
+**Acyclicity guarantee:** No circular dependencies exist. The topological order is:
+1. `shared`
+2. `access_control`, `treasury`, `risk_registry` (all leaf consumers of shared)
+3. `invoice_nft` (depends on shared + risk_registry)
+4. `financing_pool` (depends on shared + invoice_nft + risk_registry + treasury)
+5. `marketplace` (depends on all of the above)
+
+A CI step (see `.github/workflows/ci.yml`) runs `cargo tree` on every PR and fails the
+build if a cycle is ever introduced.
+
+---
+
 ## Contract Responsibilities
 
 ### `shared`
@@ -133,7 +162,8 @@ Verifier-managed SME and debtor scoring.
 **Storage:**
 - `Verifier(Address)` → `bool` (persistent)
 - `SmeProfile(Address)` → `SmeProfile` (persistent)
-- `DebtorScore(Bytes)` → `u32` (persistent, keyed by debtor hash)
+- `DebtorScoreAttestation(Bytes, Address)` → `u32` (persistent, per-verifier attestation)
+- `DebtorAttestors(Bytes)` → `Vec<Address>` (persistent, list of attesting verifiers per debtor)
 - `Admin` (instance)
 
 Verifiers are trusted off-chain entities (e.g., credit bureaus, KYC providers) who have been whitelisted by the admin. They assign risk scores to SMEs and debtors. The marketplace can optionally gate listings based on minimum risk score.

@@ -13,9 +13,11 @@ mod integration {
     use kora_financing_pool::{FinancingPoolContract, FinancingPoolContractClient};
     use kora_invoice_nft::{InvoiceNftContract, InvoiceNftContractClient};
     use kora_marketplace::{MarketplaceContract, MarketplaceContractClient};
+    use kora_price_oracle::{PriceOracleContract, PriceOracleContractClient};
     use kora_risk_registry::{RiskRegistryContract, RiskRegistryContractClient};
     use kora_shared::types::InvoiceStatus;
     use kora_treasury::{TreasuryContract, TreasuryContractClient};
+    use kora_invoice_nft::BatchInvoiceInput;
 
     // ── Test Environment ──────────────────────────────────────────────────────
 
@@ -28,11 +30,16 @@ mod integration {
         pool: FinancingPoolContractClient<'a>,
         treasury: TreasuryContractClient<'a>,
         risk_registry: RiskRegistryContractClient<'a>,
+        price_oracle: PriceOracleContractClient<'a>,
+        staking_token: Address,
     }
 
     fn deploy_protocol() -> KoraEnv<'static> {
         let env = Env::default();
-        env.mock_all_auths();
+        // risk_registry::add_verifier performs a nested token transfer that requires
+        // the verifier's auth from inside a cross-contract call, which isn't tied to
+        // the root invocation — plain mock_all_auths() rejects that non-root auth.
+        env.mock_all_auths_allowing_non_root_auth();
 
         // Set a realistic starting timestamp
         env.ledger().set(LedgerInfo {
@@ -55,6 +62,7 @@ mod integration {
         let pool_id = env.register_contract(None, FinancingPoolContract);
         let treasury_id = env.register_contract(None, TreasuryContract);
         let rr_id = env.register_contract(None, RiskRegistryContract);
+        let oracle_id = env.register_contract(None, PriceOracleContract);
 
         let ac = AccessControlContractClient::new(&env, &ac_id);
         let nft = InvoiceNftContractClient::new(&env, &nft_id);
@@ -62,15 +70,29 @@ mod integration {
         let pool = FinancingPoolContractClient::new(&env, &pool_id);
         let treasury = TreasuryContractClient::new(&env, &treasury_id);
         let rr = RiskRegistryContractClient::new(&env, &rr_id);
+        let price_oracle = PriceOracleContractClient::new(&env, &oracle_id);
+
+        // Real Stellar Asset Contract used as the risk_registry's verifier staking
+        // token, so add_verifier's token transfer has a real contract to call.
+        let staking_token_admin = Address::generate(&env);
+        let staking_token = env
+            .register_stellar_asset_contract_v2(staking_token_admin)
+            .address();
 
         // Initialize all contracts
         ac.initialize(&admin);
         nft.initialize(&admin, &ac_id);
-        mp.initialize(&admin, &nft_id, &pool_id, &treasury_id, &ac_id, &50u32);
-        let oracle_addr = Address::generate(&env);
-        pool.initialize(&admin, &nft_id, &rr_id, &treasury_id, &ac_id, &200u32, &oracle_addr);
+        price_oracle.initialize(&admin, &ac_id);
+        // max_position_bps = 10_000 (100%) — disables the per-investor concentration
+        // cap so it doesn't interfere with tests that aren't exercising that guard.
+        pool.initialize(
+            &admin, &nft_id, &rr_id, &treasury_id, &ac_id, &200u32, &oracle_id, &10_000u32, &Address::generate(&env),
+        );
+        mp.initialize(
+            &admin, &nft_id, &pool_id, &treasury_id, &ac_id, &oracle_id, &rr_id, &50u32, &0u32,
+        );
         treasury.initialize(&admin, &50u32);
-        rr.initialize(&admin, &nft_id);
+        rr.initialize(&admin, &nft_id, &staking_token, &1_000_000i128, &5_000u32);
 
         // Register authorized callers on invoice_nft (#209)
         nft.set_authorized_callers(&admin, &mp_id, &pool_id);
@@ -84,6 +106,8 @@ mod integration {
             pool,
             treasury,
             risk_registry: rr,
+            price_oracle,
+            staking_token,
         }
     }
 
@@ -126,6 +150,7 @@ mod integration {
             &due_date,
             &ipfs_cid,
             &risk_score,
+            &None,
         );
         assert_eq!(invoice_id, 1);
 
@@ -171,6 +196,7 @@ mod integration {
             &due_date,
             &ipfs_cid,
             &risk_score,
+            &None,
         );
         assert!(result.is_err());
     }
@@ -192,6 +218,7 @@ mod integration {
             &past,
             &ipfs_cid,
             &risk_score,
+            &None,
         );
         assert!(result.is_err());
     }
@@ -211,6 +238,7 @@ mod integration {
             &due_date,
             &ipfs_cid,
             &101u32,
+            &None,
         );
         assert!(result.is_err());
     }
@@ -231,6 +259,7 @@ mod integration {
             &due_date,
             &ipfs_cid,
             &risk_score,
+            &None,
         );
 
         // Cannot go Created → Funded (must go through Listed first)
@@ -267,10 +296,12 @@ mod integration {
         let verifier = Address::generate(&k.env);
         let sme = Address::generate(&k.env);
 
-        k.risk_registry.add_verifier(&k.admin, &verifier);
+        soroban_sdk::token::StellarAssetClient::new(&k.env, &k.staking_token)
+            .mint(&verifier, &1_000_000i128);
+        k.risk_registry.add_verifier(&k.admin, &verifier, &1_000_000i128);
         assert!(k.risk_registry.is_verifier(&verifier));
 
-        k.risk_registry.register_sme(&verifier, &sme, &40u32);
+        k.risk_registry.register_sme(&verifier, &sme, &40u32, &true);
         assert!(k.risk_registry.is_verified_sme(&sme));
 
         let profile = k.risk_registry.get_sme_profile(&sme);
@@ -288,7 +319,7 @@ mod integration {
 
         let result = k
             .risk_registry
-            .try_register_sme(&fake_verifier, &sme, &10u32);
+            .try_register_sme(&fake_verifier, &sme, &10u32, &true);
         assert!(result.is_err());
     }
 
@@ -337,6 +368,7 @@ mod integration {
             &due_date,
             &ipfs_cid,
             &risk_score,
+            &None,
         );
 
         // Transition to Funded state
@@ -364,6 +396,7 @@ mod integration {
             &due_date,
             &ipfs_cid,
             &risk_score,
+            &None,
         );
 
         k.invoice_nft.set_listed(&k.marketplace.address, &id);
@@ -406,7 +439,9 @@ mod integration {
     /// | financing_pool::repay             | NO (exempt)    |
     #[test]
     fn test_pause_enforcement_matrix() {
-        use kora_shared::errors::KoraError;
+        use kora_invoice_nft::InvoiceNftError;
+        use kora_marketplace::MarketplaceError;
+        use kora_financing_pool::FinancingPoolError;
 
         let k = deploy_protocol();
         let (debtor_hash, amount, currency, due_date, ipfs_cid, risk_score) =
@@ -419,6 +454,7 @@ mod integration {
         // so we have invoices to test transitions against while paused.
         let invoice_id = k.invoice_nft.mint_invoice(
             &sme, &debtor_hash, &amount, &currency, &due_date, &ipfs_cid, &risk_score,
+            &None,
         );
         k.invoice_nft.set_listed(&k.marketplace.address, &invoice_id);
         k.invoice_nft.set_funded(&k.pool.address, &invoice_id);
@@ -426,6 +462,7 @@ mod integration {
         // Mint a second invoice that stays in Created state for listed-gate testing
         let invoice_id2 = k.invoice_nft.mint_invoice(
             &sme, &debtor_hash, &amount, &currency, &due_date, &ipfs_cid, &risk_score,
+            &None,
         );
 
         // ── Pause the protocol ────────────────────────────────────────────────
@@ -435,17 +472,18 @@ mod integration {
         // ── invoice_nft::mint_invoice blocked ─────────────────────────────────
         let r = k.invoice_nft.try_mint_invoice(
             &sme, &debtor_hash, &amount, &currency, &due_date, &ipfs_cid, &risk_score,
+            &None,
         );
         assert!(r.is_err(), "mint_invoice must be blocked when paused");
         assert_eq!(
             r.unwrap_err().unwrap(),
-            KoraError::ProtocolPaused
+            InvoiceNftError::ProtocolPaused
         );
 
         // ── invoice_nft::set_listed blocked ───────────────────────────────────
         let r = k.invoice_nft.try_set_listed(&k.marketplace.address, &invoice_id2);
         assert!(r.is_err(), "set_listed must be blocked when paused");
-        assert_eq!(r.unwrap_err().unwrap(), KoraError::ProtocolPaused);
+        assert_eq!(r.unwrap_err().unwrap(), InvoiceNftError::ProtocolPaused);
 
         // ── invoice_nft::set_funded blocked ───────────────────────────────────
         // invoice_id2 is still Created; set_listed would fail with pause,
@@ -456,7 +494,12 @@ mod integration {
         // set_funded also calls require_not_paused before status check — test it:
         let r = k.invoice_nft.try_set_funded(&k.pool.address, &invoice_id2);
         assert!(r.is_err(), "set_funded must be blocked when paused");
-        assert_eq!(r.unwrap_err().unwrap(), KoraError::ProtocolPaused);
+        assert_eq!(r.unwrap_err().unwrap(), InvoiceNftError::ProtocolPaused);
+
+        // ── invoice_nft::set_repaid blocked ───────────────────────────────────
+        let r = k.invoice_nft.try_set_repaid(&k.pool.address, &invoice_id);
+        assert!(r.is_err(), "set_repaid must be blocked when paused");
+        assert_eq!(r.unwrap_err().unwrap(), InvoiceNftError::ProtocolPaused);
 
         // ── marketplace::list_invoice blocked ─────────────────────────────────
         let funding_deadline = k.env.ledger().timestamp() + 86_400 * 30;
@@ -464,27 +507,28 @@ mod integration {
         let dummy_token = Address::generate(&k.env);
         let r = k.marketplace.try_list_invoice(
             &sme, &invoice_id2, &(amount - 1), &amount, &dummy_token, &funding_deadline,
+            &None,
         );
         assert!(r.is_err(), "list_invoice must be blocked when paused");
-        assert_eq!(r.unwrap_err().unwrap(), KoraError::ProtocolPaused);
+        assert_eq!(r.unwrap_err().unwrap(), MarketplaceError::ProtocolPaused);
 
         // ── marketplace::fund_invoice blocked ─────────────────────────────────
         let r = k.marketplace.try_fund_invoice(&investor, &invoice_id, &1_000i128);
         assert!(r.is_err(), "fund_invoice must be blocked when paused");
-        assert_eq!(r.unwrap_err().unwrap(), KoraError::ProtocolPaused);
+        assert_eq!(r.unwrap_err().unwrap(), MarketplaceError::ProtocolPaused);
 
         // ── financing_pool::record_position blocked ───────────────────────────
         let r = k.pool.try_record_position(
             &k.admin, &invoice_id, &investor, &5_000_000_000i128, &10_000_000_000i128,
         );
         assert!(r.is_err(), "record_position must be blocked when paused");
-        assert_eq!(r.unwrap_err().unwrap(), KoraError::ProtocolPaused);
+        assert_eq!(r.unwrap_err().unwrap(), FinancingPoolError::ProtocolPaused);
 
         // ── financing_pool::mark_default blocked ──────────────────────────────
         let dummy_token2 = Address::generate(&k.env);
         let r = k.pool.try_mark_default(&k.admin, &invoice_id, &dummy_token2);
         assert!(r.is_err(), "mark_default must be blocked when paused");
-        assert_eq!(r.unwrap_err().unwrap(), KoraError::ProtocolPaused);
+        assert_eq!(r.unwrap_err().unwrap(), FinancingPoolError::ProtocolPaused);
 
         // ── financing_pool::repay is EXEMPT from pause ────────────────────────
         // repay will fail with PoolNotFound (no pool exists for invoice_id here
@@ -493,7 +537,7 @@ mod integration {
         assert!(r.is_err());
         assert_ne!(
             r.unwrap_err().unwrap(),
-            KoraError::ProtocolPaused,
+            FinancingPoolError::ProtocolPaused,
             "repay must NOT be blocked by pause — it is intentionally exempt"
         );
 
@@ -504,6 +548,7 @@ mod integration {
         // mint works again after unpause
         let r = k.invoice_nft.try_mint_invoice(
             &sme, &debtor_hash, &amount, &currency, &due_date, &ipfs_cid, &risk_score,
+            &None,
         );
         assert!(r.is_ok(), "mint_invoice must succeed after unpause");
     }
@@ -522,6 +567,7 @@ mod integration {
             &due_date,
             &ipfs_cid,
             &risk_score,
+            &None,
         );
         let id2 = k.invoice_nft.mint_invoice(
             &sme,
@@ -531,6 +577,7 @@ mod integration {
             &due_date,
             &ipfs_cid,
             &risk_score,
+            &None,
         );
         let id3 = k.invoice_nft.mint_invoice(
             &sme,
@@ -540,6 +587,7 @@ mod integration {
             &due_date,
             &ipfs_cid,
             &risk_score,
+            &None,
         );
 
         assert_eq!(id1, 1);
@@ -563,8 +611,9 @@ mod integration {
         // ── Setup: register SME in risk registry ─────────────────────────────
         let verifier = Address::generate(&k.env);
         let sme = Address::generate(&k.env);
-        k.risk_registry.add_verifier(&k.admin, &verifier);
-        k.risk_registry.register_sme(&verifier, &sme, &40u32);
+        StellarAssetClient::new(&k.env, &k.staking_token).mint(&verifier, &1_000_000i128);
+        k.risk_registry.add_verifier(&k.admin, &verifier, &1_000_000i128);
+        k.risk_registry.register_sme(&verifier, &sme, &40u32, &true);
 
         let profile_before = k.risk_registry.get_sme_profile(&sme);
         assert_eq!(profile_before.defaults, 0);
@@ -575,8 +624,10 @@ mod integration {
         let token = TokenClient::new(&k.env, &token_addr);
         let token_admin = StellarAssetClient::new(&k.env, &token_addr);
 
-        // Whitelist the token in the marketplace
+        // Whitelist the token in the marketplace and treasury (fund_invoice's fee
+        // collection requires the token to be whitelisted on both).
         k.marketplace.whitelist_token(&k.admin, &token_addr);
+        k.treasury.whitelist_token(&k.admin, &token_addr);
 
         // ── Two investors ─────────────────────────────────────────────────────
         let investor_a = Address::generate(&k.env);
@@ -606,6 +657,7 @@ mod integration {
             &due_date,
             &ipfs_cid,
             &risk_score,
+            &None,
         );
 
         // ── List the invoice ──────────────────────────────────────────────────
@@ -617,6 +669,7 @@ mod integration {
             &face_value,
             &token_addr,
             &funding_deadline,
+            &None,
         );
 
         // ── Both investors fund — triggers release_funds when full ────────────
@@ -700,12 +753,18 @@ mod integration {
     /// #208: treasury.get_collected must equal the sum of fees from all fund_invoice calls.
     #[test]
     fn test_fee_reconciliation() {
-        use soroban_sdk::token::{Client as TokenClient, StellarAssetClient};
+        use soroban_sdk::token::StellarAssetClient;
 
         let k = deploy_protocol();
         let sme = Address::generate(&k.env);
         let (debtor_hash, amount, currency, due_date, ipfs_cid, risk_score) =
             sample_invoice_params(&k.env);
+
+        // list_invoice requires the seller to be a compliance-attested SME.
+        let verifier = Address::generate(&k.env);
+        StellarAssetClient::new(&k.env, &k.staking_token).mint(&verifier, &1_000_000i128);
+        k.risk_registry.add_verifier(&k.admin, &verifier, &1_000_000i128);
+        k.risk_registry.register_sme(&verifier, &sme, &risk_score, &true);
 
         let token_id = k.env.register_stellar_asset_contract_v2(k.admin.clone());
         let token_addr = token_id.address();
@@ -722,9 +781,10 @@ mod integration {
         let asking_price = 9_500_000_000i128;
         let invoice_id = k.invoice_nft.mint_invoice(
             &sme, &debtor_hash, &amount, &currency, &due_date, &ipfs_cid, &risk_score,
+            &None,
         );
         let deadline = k.env.ledger().timestamp() + 86_400 * 30;
-        k.marketplace.list_invoice(&sme, &invoice_id, &asking_price, &amount, &token_addr, &deadline);
+        k.marketplace.list_invoice(&sme, &invoice_id, &asking_price, &amount, &token_addr, &deadline, &None);
 
         let contrib1 = 5_700_000_000i128;
         let contrib2 = 3_800_000_000i128;
@@ -753,6 +813,7 @@ mod integration {
 
         let id = k.invoice_nft.mint_invoice(
             &sme, &debtor_hash, &amount, &currency, &due_date, &ipfs_cid, &risk_score,
+            &None,
         );
         k.invoice_nft.set_listed(&k.marketplace.address, &id);
 
@@ -761,7 +822,7 @@ mod integration {
         assert!(result.is_err());
         assert_eq!(
             result.unwrap_err().unwrap(),
-            kora_shared::errors::KoraError::Unauthorized,
+            kora_invoice_nft::InvoiceNftError::Unauthorized,
             "arbitrary address must not be able to call set_funded"
         );
         // Invoice status must remain Listed
@@ -782,6 +843,13 @@ mod integration {
 
         // risk_score=70 → RiskTier::B
         let risk_score = 70u32;
+
+        // list_invoice requires the seller to be a compliance-attested SME.
+        let verifier = Address::generate(&k.env);
+        StellarAssetClient::new(&k.env, &k.staking_token).mint(&verifier, &1_000_000i128);
+        k.risk_registry.add_verifier(&k.admin, &verifier, &1_000_000i128);
+        k.risk_registry.register_sme(&verifier, &sme, &risk_score, &true);
+
         let token_id = k.env.register_stellar_asset_contract_v2(k.admin.clone());
         let token_addr = token_id.address();
         let token_admin = StellarAssetClient::new(&k.env, &token_addr);
@@ -802,10 +870,11 @@ mod integration {
 
         let invoice_id = k.invoice_nft.mint_invoice(
             &sme, &debtor_hash, &amount, &currency, &due_date, &ipfs_cid, &risk_score,
+            &None,
         );
         let asking_price = 9_500_000_000i128;
         let deadline = k.env.ledger().timestamp() + 86_400 * 30;
-        k.marketplace.list_invoice(&sme, &invoice_id, &asking_price, &amount, &token_addr, &deadline);
+        k.marketplace.list_invoice(&sme, &invoice_id, &asking_price, &amount, &token_addr, &deadline, &None);
 
         let contrib = 1_000_000_000i128;
         let bal_before = token.balance(&k.treasury.address);
@@ -817,5 +886,188 @@ mod integration {
 
         assert_eq!(actual_fee, expected_fee, "tier B fee (100 bps) must be applied");
         assert_ne!(actual_fee, default_fee, "flat fee must not be used when tier override exists");
+    }
+
+    /// Batch minting: three valid invoices are minted in one call.
+    /// IDs must be sequential and all statuses must be Created.
+    #[test]
+    fn test_batch_mint_success() {
+        use soroban_sdk::Vec;
+
+        let k = deploy_protocol();
+        let sme = Address::generate(&k.env);
+        let (debtor_hash, amount, currency, due_date, ipfs_cid, risk_score) =
+            sample_invoice_params(&k.env);
+
+        let mut batch: Vec<BatchInvoiceInput> = Vec::new(&k.env);
+        for _ in 0..3u32 {
+            batch.push_back(BatchInvoiceInput {
+                debtor_hash: debtor_hash.clone(),
+                amount,
+                currency: currency.clone(),
+                due_date,
+                ipfs_cid: ipfs_cid.clone(),
+                risk_score,
+                notes: None,
+            });
+        }
+
+        let ids = k.invoice_nft.mint_invoices_batch(&sme, &batch);
+
+        assert_eq!(ids.len(), 3);
+        assert_eq!(ids.get(0).unwrap(), 1u64);
+        assert_eq!(ids.get(1).unwrap(), 2u64);
+        assert_eq!(ids.get(2).unwrap(), 3u64);
+
+        for i in 0..3u32 {
+            let invoice = k.invoice_nft.get_invoice(&ids.get(i).unwrap());
+            assert_eq!(invoice.status, InvoiceStatus::Created);
+            assert_eq!(invoice.sme, sme);
+        }
+        // next_id advanced by 3
+        assert_eq!(k.invoice_nft.next_id(), 4);
+    }
+
+    /// Batch minting is atomic: one invalid entry aborts the entire batch.
+    /// No invoices must be stored when any entry fails validation.
+    #[test]
+    fn test_batch_mint_atomic_abort_on_invalid_input() {
+        use soroban_sdk::Vec;
+
+        let k = deploy_protocol();
+        let sme = Address::generate(&k.env);
+        let (debtor_hash, amount, currency, due_date, ipfs_cid, risk_score) =
+            sample_invoice_params(&k.env);
+
+        let mut batch: Vec<BatchInvoiceInput> = Vec::new(&k.env);
+        // valid entry
+        batch.push_back(BatchInvoiceInput {
+            debtor_hash: debtor_hash.clone(),
+            amount,
+            currency: currency.clone(),
+            due_date,
+            ipfs_cid: ipfs_cid.clone(),
+            risk_score,
+            notes: None,
+        });
+        // invalid entry: zero amount
+        batch.push_back(BatchInvoiceInput {
+            debtor_hash: debtor_hash.clone(),
+            amount: 0,
+            currency: currency.clone(),
+            due_date,
+            ipfs_cid: ipfs_cid.clone(),
+            risk_score,
+            notes: None,
+        });
+
+        let result = k.invoice_nft.try_mint_invoices_batch(&sme, &batch);
+        assert!(result.is_err(), "batch with invalid entry must fail");
+        // No invoices committed — next_id stays at 1
+        assert_eq!(k.invoice_nft.next_id(), 1, "next_id must not advance on abort");
+    }
+
+    /// Batch minting with risk_score > 100 is rejected atomically.
+    #[test]
+    fn test_batch_mint_invalid_risk_score_aborts() {
+        use soroban_sdk::Vec;
+
+        let k = deploy_protocol();
+        let sme = Address::generate(&k.env);
+        let (debtor_hash, amount, currency, due_date, ipfs_cid, _) =
+            sample_invoice_params(&k.env);
+
+        let mut batch: Vec<BatchInvoiceInput> = Vec::new(&k.env);
+        batch.push_back(BatchInvoiceInput {
+            debtor_hash,
+            amount,
+            currency,
+            due_date,
+            ipfs_cid,
+            risk_score: 101, // invalid
+            notes: None,
+        });
+
+        let result = k.invoice_nft.try_mint_invoices_batch(&sme, &batch);
+        assert!(result.is_err());
+        assert_eq!(k.invoice_nft.next_id(), 1);
+    }
+
+    /// Batch minting rejects requests exceeding MAX_BATCH_MINT_SIZE (25).
+    /// Should fail before any validation/storage work, returning BatchSizeExceeded error.
+    #[test]
+    fn test_batch_mint_size_exceeded_rejects_early() {
+        use soroban_sdk::Vec;
+        use kora_invoice_nft::InvoiceNftError;
+
+        let k = deploy_protocol();
+        let sme = Address::generate(&k.env);
+        let (debtor_hash, amount, currency, due_date, ipfs_cid, risk_score) =
+            sample_invoice_params(&k.env);
+
+        // Create batch with 26 invoices (exceeds MAX_BATCH_MINT_SIZE of 25)
+        let mut batch: Vec<BatchInvoiceInput> = Vec::new(&k.env);
+        for _ in 0..26u32 {
+            batch.push_back(BatchInvoiceInput {
+                debtor_hash: debtor_hash.clone(),
+                amount,
+                currency: currency.clone(),
+                due_date,
+                ipfs_cid: ipfs_cid.clone(),
+                risk_score,
+                notes: None,
+            });
+        }
+
+        let result = k.invoice_nft.try_mint_invoices_batch(&sme, &batch);
+        assert!(result.is_err(), "batch size 26 must be rejected");
+        assert_eq!(
+            result.unwrap_err().unwrap(),
+            InvoiceNftError::BatchSizeExceeded,
+            "error must be BatchSizeExceeded"
+        );
+        // next_id must not advance — no invoices stored
+        assert_eq!(k.invoice_nft.next_id(), 1, "next_id must not change on early rejection");
+    }
+
+    /// Batch minting succeeds at the maximum allowed batch size (25).
+    #[test]
+    fn test_batch_mint_at_max_size_succeeds() {
+        use soroban_sdk::Vec;
+        use kora_shared::validation::MAX_BATCH_MINT_SIZE;
+
+        let k = deploy_protocol();
+        let sme = Address::generate(&k.env);
+        let (debtor_hash, amount, currency, due_date, ipfs_cid, risk_score) =
+            sample_invoice_params(&k.env);
+
+        // Create batch with exactly MAX_BATCH_MINT_SIZE (25) invoices
+        let mut batch: Vec<BatchInvoiceInput> = Vec::new(&k.env);
+        for _ in 0..MAX_BATCH_MINT_SIZE {
+            batch.push_back(BatchInvoiceInput {
+                debtor_hash: debtor_hash.clone(),
+                amount,
+                currency: currency.clone(),
+                due_date,
+                ipfs_cid: ipfs_cid.clone(),
+                risk_score,
+                notes: None,
+            });
+        }
+
+        let ids = k.invoice_nft.mint_invoices_batch(&sme, &batch);
+        assert_eq!(ids.len(), MAX_BATCH_MINT_SIZE);
+        // All invoices must be stored with sequential IDs
+        for i in 0..MAX_BATCH_MINT_SIZE {
+            let invoice = k.invoice_nft.get_invoice(&((i + 1) as u64));
+            assert_eq!(invoice.status, InvoiceStatus::Created);
+            assert_eq!(invoice.sme, sme);
+        }
+        // next_id advanced by 25
+        assert_eq!(
+            k.invoice_nft.next_id(),
+            (MAX_BATCH_MINT_SIZE + 1) as u64,
+            "next_id must advance by batch size"
+        );
     }
 }

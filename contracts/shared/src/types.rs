@@ -1,4 +1,4 @@
-use soroban_sdk::{contracttype, Address, Bytes, String, Symbol, Vec};
+use soroban_sdk::{contracttype, Address, Bytes, BytesN, String, Symbol, Vec};
 
 /// Invoice lifecycle status
 #[contracttype]
@@ -71,12 +71,62 @@ pub struct Invoice {
 pub struct Listing {
     pub invoice_id: u64,
     pub seller: Address,
-    pub asking_price: i128, // discounted price investors pay
+    pub asking_price: i128, // discounted price investors pay (the starting price for Dutch auction)
     pub face_value: i128,   // full repayment amount
     pub token: Address,     // whitelisted stablecoin
     pub funded_amount: i128,
     pub funding_deadline: u64,
     pub is_active: bool,
+    /// Optional deadline for the reverse-auction bidding window (#440).
+    /// When `Some`, direct `fund_invoice` calls are rejected until
+    /// `accept_bids` converts winning bids into positions.
+    /// When `None`, the listing uses the standard first-come-first-served flow.
+    pub bidding_deadline: Option<u64>,
+}
+
+/// Dutch-auction / linear-decay price schedule for a listing (#439).
+///
+/// When attached to a listing via `DataKey::DecaySchedule(invoice_id)`, the
+/// effective asking price decays linearly from `start_price` to `floor_price`
+/// over the window `[decay_start_ts, decay_end_ts]`.
+///
+/// - Before `decay_start_ts`  : price == `start_price` (original asking price)
+/// - After  `decay_end_ts`    : price == `floor_price`  (floor)
+/// - In between               : linear interpolation
+///
+/// `floor_price` must be > 0 and < `start_price`.
+/// `decay_end_ts` must be <= `funding_deadline` of the listing.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DecaySchedule {
+    /// The initial (ceiling) price — mirrors `Listing::asking_price`.
+    pub start_price: i128,
+    /// The minimum (floor) price the listing will reach.
+    pub floor_price: i128,
+    /// Timestamp at which price decay begins.
+    pub decay_start_ts: u64,
+    /// Timestamp at which the price reaches `floor_price` (and stays there).
+    pub decay_end_ts: u64,
+}
+
+/// A reverse-auction bid submitted by an investor (#440).
+///
+/// Stored under `DataKey::Bid(invoice_id, investor)`.
+/// The investor commits to funding `amount` tokens at `bid_price` total.
+/// `bid_price` must be <= current asking price and >= the floor price (if a
+/// decay schedule is active).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct Bid {
+    pub investor: Address,
+    pub invoice_id: u64,
+    /// The total price the investor is willing to pay for their `amount` share.
+    /// Must satisfy `bid_price <= current_asking_price`.
+    pub bid_price: i128,
+    /// The token amount the investor proposes to contribute.
+    pub amount: i128,
+    /// Ledger timestamp when the bid was submitted.
+    pub submitted_at: u64,
 }
 
 /// A single investor position in a pool
@@ -113,6 +163,8 @@ pub struct PositionSaleOffer {
     pub invoice_id: u64,
     pub token: Address,
     pub price: i128,
+}
+
 /// An SME's early-termination buyout offer for a funded invoice.
 ///
 /// The SME escrows `amount` (a discount to `total_owed`) into the pool; investors then
@@ -125,6 +177,16 @@ pub struct EarlySettlementOffer {
     pub amount: i128,      // escrowed buyout amount, denominated in the pool token
     pub accepted_bps: u32, // cumulative share_bps of investors that have accepted
     pub accepted: Vec<Address>, // investors that have already accepted (dedup guard)
+}
+
+/// Pending repayment approval for a high-value invoice repayment.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct RepaymentApproval {
+    pub invoice_id: u64,
+    pub amount: i128,
+    pub approvals: Vec<Address>,
+    pub executed: bool,
 }
 
 /// Protocol-level configuration.
@@ -140,6 +202,24 @@ pub struct ProtocolConfig {
     pub min_funding_period: u64,
 }
 
+/// Per-risk-tier face-value bounds for invoice minting/listing.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AmountBounds {
+    pub min: i128,
+    pub max: i128,
+}
+
+impl AmountBounds {
+    pub fn new(min: i128, max: i128) -> Self {
+        Self { min, max }
+    }
+
+    pub fn is_within(&self, amount: i128) -> bool {
+        amount >= self.min && amount <= self.max
+    }
+}
+
 /// SME profile in the risk registry
 #[contracttype]
 #[derive(Clone, Debug)]
@@ -152,6 +232,8 @@ pub struct SmeProfile {
     pub defaults: u32,
     pub registered_at: u64,
     pub compliance_attested: bool,
+    /// Maximum aggregate exposure across active invoices (0 = unlimited).
+    pub credit_limit: i128,
 }
 
 /// Action types that can be proposed for multisig execution
@@ -163,49 +245,48 @@ pub enum AdminAction {
     GrantRole(Address, u32),
     RevokeRole(Address),
     TransferAdmin(Address),
+    /// Rotate the admin key to a new address.
+    /// Identical effect to
+    RotateAdmin(Address),
+    /// Replace the co-signer set and/or threshold. Requires its own quorum.
+    UpdateSigners(Vec<Address>, u32),
 }
 
-/// A multisig proposal awaiting approval
-#[contracttype]
-#[derive(Clone, Debug)]
-pub struct Proposal {
-    pub id: u64,
-    pub action: AdminAction,
-    pub proposer: Address,
-    pub approvals: Vec<Address>,
-    pub executed: bool,
-    pub created_at: u64,
-    pub expires_at: u64,
-}
-
-/// Multisig configuration
+/// Multi-signature governance configuration for the access-control contract.
+///
+/// Holds the set of co-signers and the N-of-M approval threshold. Privileged
+/// operations are only executed once a quorum of distinct co-signers has
+/// approved the corresponding `PendingAction` within the configured window.
 #[contracttype]
 #[derive(Clone, Debug)]
 pub struct MultisigConfig {
-    pub threshold: u32,
+    /// The set of authorized co-signers (M).
     pub signers: Vec<Address>,
+    /// Number of distinct approvals required to execute an action (N).
+    pub threshold: u32,
+    /// Maximum age (in seconds) a pending action may remain open before it
+    /// expires and can no longer be executed.
+    pub window_secs: u64,
 }
 
-/// A tunable protocol parameter governed by the parameter-change process.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub enum ParameterKey {
-    FeeBps,         // protocol fee in basis points
-    LatePenaltyBps, // late-repayment penalty in basis points
-    MaxRiskScore,   // ceiling for accepted invoice risk scores (0–100)
-}
-
-/// A governance proposal to change a single protocol parameter.
+/// A privileged action awaiting a quorum of co-signer approvals.
 ///
-/// Reuses the B2 multisig signer set for gating and a B1-style timelock before execution.
+/// Keyed by the action hash so that identical actions proposed by different
+/// signers collapse into a single queue entry. Once `approvals` reaches the
+/// configured threshold the action may be executed exactly once.
 #[contracttype]
 #[derive(Clone, Debug)]
-pub struct ParameterProposal {
-    pub id: u64,
-    pub key: ParameterKey,
-    pub new_value: u32,
-    pub proposer: Address,
-    pub approvals: Vec<Address>, // signers that have voted in favour
-    pub created_at: u64,
+pub struct PendingAction {
+    /// Hash identifying the action payload (see `AdminAction`).
+    pub action_hash: BytesN<32>,
+    /// The action to execute once the threshold is met.
+    pub action: AdminAction,
+    /// Distinct co-signers that have approved this action so far.
+    pub approvals: Vec<Address>,
+    /// Ledger timestamp when the action was first proposed.
+    pub proposed_at: u64,
+    /// Ledger timestamp after which the action expires and cannot execute.
+    pub expires_at: u64,
+    /// Set once the action has been executed to prevent replays.
     pub executed: bool,
 }

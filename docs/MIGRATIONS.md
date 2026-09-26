@@ -1,192 +1,118 @@
-# Schema Migration Runbook
+# Contract Migrations & Timelocked Upgrades
 
-This document describes the process for safely evolving `#[contracttype]` struct
-schemas in the Kora Protocol. Read this before adding, removing, or reordering
-fields on `Invoice`, `Pool`, `Position`, `SmeProfile`, `Listing`, or any other
-persisted type in `kora-shared/src/types.rs`.
+This document describes the standardized, timelocked upgrade mechanism used across
+all Kora contracts. It is the reference for operators, auditors, and integrators
+who need to understand how WASM upgrades and storage migrations are proposed,
+reviewed, and executed.
 
----
+## Motivation
 
-## Why schema changes are binary-incompatible
+Instant, admin-triggered upgrades are a major trust concern for institutional
+investors (see `THREAT_MODEL.md`). A timelock gives the community and auditors a
+window to review and react to a proposed upgrade before it takes effect. Every
+upgrade is therefore:
 
-Every `#[contracttype]` struct is encoded with Soroban's XDR codec.  The codec
-uses **positional field encoding** — field N in the struct corresponds to field N
-in the wire format, with no field names embedded.
+1. **Proposed** on-chain and publicly visible.
+2. **Delayed** by a configurable, admin-set interval.
+3. **Executable** only after the delay has elapsed.
+4. **Cancellable** by the admin before execution.
 
-Consequences:
-- Adding a field (even at the end) changes the total field count.  Existing
-  records encoded without that field will panic when deserialized under the new
-  struct definition.
-- Removing a field shifts every field that came after it.
-- Reordering fields produces silent data corruption (values decode into the wrong
-  fields without error).
+On-chain governance voting over upgrades is intentionally out of scope here and
+is tracked separately under Governance.
 
-There is no built-in versioning or schema evolution.  Every change requires an
-explicit migration that reads old records with the old struct definition and
-rewrites them with the new one.
+## The Shared `Timelock` Module
 
----
+The mechanism lives in `contracts/shared/src/timelock.rs` and is re-exported from
+`contracts/shared/src/lib.rs` so that every contract can adopt it from its upgrade
+entrypoint without duplicating logic.
 
-## The migration pattern
-
-### Step 1 — define the legacy struct
-
-Before changing the live struct in `kora-shared/src/types.rs`, copy its current
-definition into the contract that owns the data (e.g. `invoice_nft/src/lib.rs`)
-under a versioned name such as `InvoiceV1`.  Annotate it with `#[contracttype]`
-so it uses the same XDR codec as the original.
+### Data Model
 
 ```rust
-// contracts/invoice_nft/src/lib.rs
-#[contracttype]
-#[derive(Clone)]
-pub struct InvoiceV1 {
+pub struct UpgradeProposal {
     pub id: u64,
-    pub sme: Address,
-    // ... all fields as they were BEFORE the change ...
-    pub repaid_at: Option<u64>,
-    // no `notes` field here
+    pub wasm_hash: BytesN<32>,
+    pub proposer: Address,
+    pub proposed_at: u64,
+    pub executed: bool,
+    pub cancelled: bool,
 }
 ```
 
-### Step 2 — update the live struct
+Proposals are stored in persistent storage keyed by their monotonically
+increasing `id`. The configured delay is stored separately and is settable by the
+admin.
 
-Add (or remove, or reorder) the field in `kora-shared/src/types.rs`.  Update the
-schema-version comment on the struct.
+### API
+
+| Function | Description |
+| --- | --- |
+| `propose_upgrade(env, admin, wasm_hash) -> u64` | Records the proposed WASM hash, proposer, and `proposed_at` timestamp. Returns the new proposal `id`. Emits an `upgrade_proposed` event. |
+| `execute_upgrade(env, admin, id)` | Executes a proposal only when `env.ledger().timestamp() >= proposed_at + delay`. Emits an `upgrade_executed` event. |
+| `cancel_upgrade(env, admin, id)` | Cancels a pending proposal before execution. Emits an `upgrade_cancelled` event. |
+| `set_upgrade_delay(env, admin, delay)` | Sets the configurable upgrade delay (admin only). |
+| `get_upgrade_delay(env) -> u64` | Returns the currently configured delay. |
+| `get_proposal(env, id) -> UpgradeProposal` | Returns a stored proposal for inspection. |
+
+### Delay Semantics
+
+- A sane default delay is applied on initialization.
+- The admin may adjust the delay via `set_upgrade_delay`.
+- `execute_upgrade` reverts with an early-execution error when
+  `env.ledger().timestamp() < proposed_at + delay`.
+
+### Edge Cases & Constraints
+
+- **Early execution is rejected.** Calling `execute_upgrade` before the delay has
+  elapsed fails.
+- **Replay is prevented.** A proposal that has already been executed cannot be
+  executed again; the `executed` flag is checked and set atomically.
+- **Cancellation is supported.** A pending proposal may be cancelled by the admin
+  and can no longer be executed.
+- **Unknown ids are rejected.** Executing or cancelling a non-existent proposal
+  fails.
+
+## Adopting the Module in a Contract
+
+Each contract's upgrade entrypoint should delegate to the shared module rather
+than performing an immediate upgrade:
 
 ```rust
-// kora-shared/src/types.rs
-/// Schema version: 2
-#[contracttype]
-pub struct Invoice {
-    // ... all previous fields ...
-    pub repaid_at: Option<u64>,
-    /// Added in schema v2.
-    pub notes: Option<String>,
+// propose
+let id = timelock::propose_upgrade(&env, admin.clone(), new_wasm_hash.clone());
+
+// later, after the delay has elapsed
+let proposal = timelock::get_proposal(&env, id);
+if env.ledger().timestamp() < proposal.proposed_at + timelock::get_upgrade_delay(&env) {
+    panic!("upgrade delay has not elapsed");
 }
+timelock::execute_upgrade(&env, admin.clone(), id);
 ```
 
-### Step 3 — update all construction sites
+## Events
 
-Every place that constructs the struct must now supply the new field.  For new
-mints, the value is usually the caller-supplied argument or a sensible default.
+Both proposal and execution emit events so that off-chain monitors and the
+community can observe the full lifecycle:
 
-```rust
-// contracts/invoice_nft/src/lib.rs — mint_invoice
-let invoice = Invoice {
-    // ... existing fields ...
-    repaid_at: None,
-    notes,           // new parameter propagated from the function signature
-};
-```
+- `upgrade_proposed` — emitted when a proposal is created.
+- `upgrade_executed` — emitted when a proposal is executed.
+- `upgrade_cancelled` — emitted when a proposal is cancelled.
 
-### Step 4 — implement the migration in `migrate()`
+## Testing Requirements
 
-Gate the migration on the stored `MigrationVersion` so it is idempotent:
+Adopting contracts must maintain a minimum of 90% coverage over the timelock
+paths. At a minimum, tests must cover:
 
-```rust
-// Version 1 -> 2: Invoice gained `notes: Option<String>`.
-if current_version < 2 {
-    let next_id: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(1);
-    let mut id = 1u64;
-    while id < next_id {
-        let key = DataKey::Invoice(id);
-        if let Some(old) = env.storage().persistent().get::<DataKey, InvoiceV1>(&key) {
-            let upgraded = Invoice {
-                id: old.id,
-                sme: old.sme,
-                // ... copy every field ...
-                repaid_at: old.repaid_at,
-                notes: None,   // backfill with the default for old records
-            };
-            env.storage().persistent().set(&key, &upgraded);
-        }
-        id += 1;
-    }
-    env.storage().instance().set(&DataKey::MigrationVersion, &2u32);
-}
-```
+- **Early-execution rejection** — executing before the delay elapses fails.
+- **Cancellation** — a cancelled proposal cannot be executed.
+- **Successful post-delay execution** — a proposal executes once the delay has
+  elapsed.
+- **Replay prevention** — an executed proposal cannot be executed again.
 
-### Step 5 — deploy and run the migration
+## Operational Checklist
 
-**Order of operations is critical:**
-
-1. Prepare and test the new WASM locally.
-2. Upgrade the contract on-chain (`upgrade_wasm`).
-3. Call `migrate()` **before any other user interaction**.
-   - Until `migrate()` runs, any read of an old record as the new struct will
-     panic and abort the transaction.
-   - Any new write (e.g. a new `mint_invoice`) will produce a v2 record that
-     cannot be read by the migration's `InvoiceV1` decoder.
-4. Verify by calling `get_invoice()` on a few known IDs and confirming the new
-   field is present with its default value.
-5. Once all records have been upgraded, the `InvoiceV{N}` legacy struct can be
-   removed in the next upgrade cycle.
-
-### Step 6 — clean up
-
-After all nodes have called `migrate()` and you are satisfied that no old records
-remain, remove the legacy struct in your next PR.
-
----
-
-## Worked example: adding `notes: Option<String>` to `Invoice`
-
-This is the concrete change shipped as schema v2.
-
-| | v1 (original) | v2 (current) |
-|---|---|---|
-| struct | `Invoice` (no `notes`) | `Invoice` with `notes: Option<String>` |
-| legacy | — | `InvoiceV1` (copy of v1, kept for migration) |
-| `MigrationVersion` after `migrate()` | 1 | 2 |
-| backfill value | n/a | `notes = None` |
-
-**Files changed:**
-- `contracts/shared/src/types.rs` — added `notes` field, updated doc comment
-- `contracts/invoice_nft/src/lib.rs` — added `InvoiceV1`, updated `migrate()`,
-  updated `mint_invoice` signature (new `notes: Option<String>` parameter)
-
-**Tests:**
-- `test_migrate_v1_to_v2_backfills_notes_field` — writes a raw `InvoiceV1`
-  record to persistent storage, resets `MigrationVersion` to 1, calls
-  `migrate()`, then asserts `get_invoice()` returns a valid v2 record with
-  `notes = None`.
-
----
-
-## Checklist for every schema migration
-
-- [ ] Legacy struct `Foo_V{N}` added with `#[contracttype]` BEFORE changing `Foo`
-- [ ] New field added to `Foo` in `kora-shared/src/types.rs`
-- [ ] All construction sites updated
-- [ ] `migrate()` gate added: `if current_version < N+1 { ... }`
-- [ ] `MigrationVersion` bumped to `N+1` at the end of the gate
-- [ ] Test added that writes a raw `FooV{N}` record and asserts readable post-migration
-- [ ] Upgrade → `migrate()` ordering documented in the deployment PR
-- [ ] Legacy struct removal scheduled for the following upgrade cycle
-
----
-
-## Version history
-
-| Version | Change | Migration gate | File |
-|---------|--------|---------------|------|
-| 1 | Baseline — all original fields | v0 → v1 (no-op, sets version) | `invoice_nft::migrate` |
-| 2 | `Invoice.notes: Option<String>` added | v1 → v2, backfills `notes = None` | `invoice_nft::migrate` |
-
----
-
-## Contracts with mutable on-chain state
-
-All structs below are `#[contracttype]` and stored live on-chain.  Any field
-change requires a migration following the pattern above.
-
-| Struct | Contract | Storage key |
-|--------|----------|-------------|
-| `Invoice` | `invoice_nft` | `DataKey::Invoice(u64)` (persistent) |
-| `Pool` | `financing_pool` | `DataKey::Pool(u64)` (persistent) |
-| `Position` | `financing_pool` | `DataKey::Positions(u64)` (persistent, inside `Map`) |
-| `SmeProfile` | `risk_registry` | `DataKey::SmeProfile(Address)` (persistent) |
-| `Listing` | `marketplace` | `DataKey::Listing(u64)` (persistent) |
-| `Proposal` | `access_control` | `DataKey::Proposal(u64)` (persistent) |
-| `MultisigConfig` | `access_control` | `DataKey::MultisigConfig` (instance) |
+1. Propose the upgrade and record the returned `id`.
+2. Announce the proposal and the intended execution time to the community.
+3. Wait for the configured delay to elapse.
+4. Execute the upgrade (or cancel it if concerns are raised).
+5. Verify the emitted `upgrade_executed` event and the new WASM hash.

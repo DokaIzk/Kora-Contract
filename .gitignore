@@ -23,3 +23,14 @@ waves-issues.md
 # Rust artifacts
 Cargo.lock.bak
 **/*.orig
+
+# Python artifacts
+__pycache__/
+*.pyc
+
+# Node/TS artifacts (sdk/)
+node_modules/
+dist/
+*.tsbuildinfo
+npm-debug.log*
+*.log
