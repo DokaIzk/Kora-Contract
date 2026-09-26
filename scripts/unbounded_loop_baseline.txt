@@ -6,3 +6,4 @@
 # cross-contract call is moved out of it) so it can't silently regress.
 
 contracts/financing_pool/src/lib.rs:distribute_yield
+contracts/invoice_nft/src/lib.rs:mint_invoice_batch

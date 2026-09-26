@@ -326,3 +326,11 @@ MIT — see [LICENSE](LICENSE).
 ## Acknowledgements
 
 Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-world invoice financing gap facing African SMEs and the potential of blockchain infrastructure to close it.
+
+## Handsoff notes
+
+<!-- handsoff-issue-728 -->
+- #728: [High] Implement Tiered Protocol Fee Structure Based on Investor Volume
+
+<!-- handsoff-issue-733 -->
+- #733: [High] Add Multi-Asset (Multi-Token) Support to Financing Pool
