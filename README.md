@@ -326,3 +326,8 @@ MIT — see [LICENSE](LICENSE).
 ## Acknowledgements
 
 Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-world invoice financing gap facing African SMEs and the potential of blockchain infrastructure to close it.
+
+## Handsoff notes
+
+<!-- handsoff-issue-722 -->
+- #722: [High] Implement Partial Repayment Support in Financing Pool
