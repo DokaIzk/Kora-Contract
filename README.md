@@ -341,3 +341,6 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-733 -->
 - #733: [High] Add Multi-Asset (Multi-Token) Support to Financing Pool
+
+<!-- handsoff-issue-756 -->
+- #756: [High] Build Notification Service for Invoice Lifecycle Events
