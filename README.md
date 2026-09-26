@@ -331,3 +331,6 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-726 -->
 - #726: [High] Implement Cross-Invoice Portfolio Diversification Cap in Marketplace
+
+<!-- handsoff-issue-727 -->
+- #727: [High] Build Automated Default Detection and Liquidation Trigger
