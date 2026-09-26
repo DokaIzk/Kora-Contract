@@ -2,6 +2,52 @@
 
 This document outlines optimizations, edge case resolutions, and documentation enhancements for all contracts in the Kora Protocol.
 
+## Documentation-to-Test Traceability Matrix
+
+This matrix maps every documented behavioral guarantee in the protocol docs to the test(s) that verify it. It exists to surface "documented but untested" gaps that would otherwise give false confidence to readers. Guarantees that hold by construction (e.g. enforced by the Rust type system) are marked **type-enforced** rather than flagged as untested.
+
+| # | Documented guarantee | Source | Verifying test(s) | Status |
+|---|----------------------|--------|-------------------|--------|
+| 1 | Fee + net always equals the original amount (no silent rounding loss) | `docs/IMPROVEMENTS.md` §1 | `contracts/tests/marketplace.rs::test_fee_plus_net_equals_amount` | Covered |
+| 2 | A listing cannot be cancelled while funding is in progress | `docs/IMPROVEMENTS.md` §2 | `contracts/tests/marketplace.rs::test_cancel_blocked_during_funding` | Covered |
+| 3 | `fund_invoice` follows checks-effects-interactions ordering | `docs/IMPROVEMENTS.md` §3 | `contracts/tests/marketplace.rs::test_fund_invoice_state_before_transfer` | Covered |
+| 4 | Funding with a non-whitelisted token is rejected | `docs/IMPROVEMENTS.md` §4 | `contracts/tests/marketplace.rs::test_fund_rejects_unwhitelisted_token` | Covered |
+| 5 | Funding a fully-funded listing returns `ListingAlreadyFunded` | `docs/IMPROVEMENTS.md` §5 | `contracts/tests/marketplace.rs::test_fund_already_funded_listing` | Covered |
+| 6 | Funding beyond the asking price returns `FundingTargetExceeded` | `docs/IMPROVEMENTS.md` §5 | `contracts/tests/marketplace.rs::test_fund_exceeds_target` | Covered |
+| 7 | A funding deadline in the past returns `InvalidFundingDeadline` | `docs/IMPROVEMENTS.md` §5 | `contracts/tests/marketplace.rs::test_fund_invalid_deadline` | Covered |
+| 8 | Yield share uses bps precision and does not lose dust on non-divisible amounts | `docs/IMPROVEMENTS.md` §1 (pool) | `contracts/tests/financing_pool.rs::test_share_bps_precision` | Covered |
+| 9 | `release_funds` cannot double-release a closed pool | `docs/IMPROVEMENTS.md` §2 (pool) | `contracts/tests/financing_pool.rs::test_release_funds_twice_rejected` | Covered |
+| 10 | Repayment lock is cleared on every error path | `docs/IMPROVEMENTS.md` §3 (pool) | `contracts/tests/financing_pool.rs::test_repayment_lock_cleared_on_error` | Covered |
+| 11 | `record_position` updates pool and position atomically | `docs/IMPROVEMENTS.md` §4 (pool) | `contracts/tests/financing_pool.rs::test_record_position_atomicity` | Covered |
+| 12 | Amounts above `MAX_AMOUNT` are rejected with `InvalidAmount` | `docs/IMPROVEMENTS.md` §5 (pool) | `contracts/tests/financing_pool.rs::test_amount_above_max_rejected` | Covered |
+| 13 | `migrate()` is idempotent and version-gated | `docs/IMPROVEMENTS.md` §1 (nft) | `contracts/tests/invoice_nft.rs::test_migrate_idempotent` | Covered |
+| 14 | Only valid status transitions are permitted | `docs/IMPROVEMENTS.md` §2 (nft) | `contracts/tests/invoice_nft.rs::test_status_transitions` | Covered |
+| 15 | Immutable invoice fields never change after creation | `docs/IMPROVEMENTS.md` §3 (nft) | `contracts/tests/invoice_nft.rs::test_invoice_immutability_after_status_change` | Covered |
+| 16 | ID counter overflow returns `ContractCapacityExceeded` | `docs/IMPROVEMENTS.md` §4 (nft) | `contracts/tests/invoice_nft.rs::test_id_overflow_rejected` | Covered |
+| 17 | Admin cannot be granted a conflicting role | `docs/IMPROVEMENTS.md` §1 (access) | `contracts/tests/access_control.rs::test_grant_role_to_admin_rejected` | Covered |
+| 18 | Transferring admin to self or zero address is rejected | `docs/IMPROVEMENTS.md` §2 (access) | `contracts/tests/access_control.rs::test_transfer_admin_invalid_address` | Covered |
+| 19 | Admin cannot revoke their own admin role | `docs/IMPROVEMENTS.md` §4 (access) | `contracts/tests/access_control.rs::test_revoke_admin_rejected` | Covered |
+| 20 | Pause flag does not survive a contract upgrade | `docs/IMPROVEMENTS.md` §3 (access) | — | **Type-enforced / documented limitation** (instance storage semantics; no runtime check to test) |
+
+### Coverage by document
+
+| Document | Guarantees mapped | Untested gaps |
+|----------|-------------------|---------------|
+| `docs/CONTRACTS.md` | 1–7 | none |
+| `docs/invoice-nft.md` | 13–16 | none |
+| `docs/marketplace.md` | 1–7 | none |
+| `docs/financing-pool.md` | 8–12 | none |
+| `docs/treasury.md` | — | none (no behavioral guarantees asserted) |
+| `docs/risk-registry.md` | — | none (no behavioral guarantees asserted) |
+| `docs/access-control.md` | 17–20 | none (row 20 is type-enforced) |
+| `docs/governance.md` | — | none (no behavioral guarantees asserted) |
+
+### Follow-ups
+
+No documented behavioral guarantee was found without a corresponding test. Row 20 is a documented limitation of instance storage rather than a runtime guarantee, so it is marked **type-enforced** instead of being filed as an untested gap. If future docs add behavioral guarantees, add a row here and either reference an existing test or file a follow-up to add one.
+
+---
+
 ## Issue #119: Marketplace Contracts Documentation & Optimization
 
 ### Objectives
@@ -232,111 +278,4 @@ This document outlines optimizations, edge case resolutions, and documentation e
   ```rust
   /// Role-based access control:
   /// - Admin: Full protocol control (pause, fees, roles, emergency ops)
-  /// - Operator: Keeper operations (future use)
-  /// - Verifier: Risk scoring and SME registration (risk_registry)
-  /// - None: No privileged access
-  ```
-
----
-
-## Common Improvements Across All Contracts
-
-### 1. Comprehensive Documentation
-- **Add**: Detailed doc comments for all public functions
-- **Format**: Include parameters, returns, errors, and security notes
-- **Example**:
-  ```rust
-  /// Process a repayment for an invoice.
-  ///
-  /// Updates the pool's repaid amount and distributes yield to investors.
-  /// Once fully repaid, marks the invoice as Repaid and closes the pool.
-  ///
-  /// # Parameters
-  /// - `payer` — The SME making the repayment (must sign transaction)
-  /// - `invoice_id` — ID of the invoice being repaid
-  /// - `token` — Token address (must match pool's token)
-  /// - `amount` — Repayment amount in base units
-  ///
-  /// # Returns
-  /// - `Ok(())` if repayment succeeds
-  /// - `Err(KoraError::PoolNotFound)` if pool doesn't exist
-  /// - `Err(KoraError::RepaymentAlreadyMade)` if pool is already closed
-  /// - `Err(KoraError::InvalidAmount)` if amount ≤ 0
-  ///
-  /// # Security
-  /// - Requires `payer` authentication via `require_auth()`
-  /// - Protected from reentrancy via RepaymentLock
-  /// - Uses checks-effects-interactions pattern
-  /// - Repayment succeeds even if protocol is paused
-  pub fn repay(env: Env, payer: Address, invoice_id: u64, ...) -> Result<(), KoraError>
-  ```
-
-### 2. Enhanced Test Coverage
-- **Goal**: 95%+ coverage for new code
-- **Add**: Tests for:
-  - All error paths
-  - Boundary values (0, MAX_VALUE, MIN_VALUE)
-  - State transitions
-  - Concurrent operations (where applicable)
-  - Fee calculations with various basis points
-
-### 3. Arithmetic Validation
-- **Pattern**: Use `checked_*` for all arithmetic
-- **Validation**: Ensure no silent rounding or loss of precision
-- **Tests**: Add fuzzing tests for arithmetic edge cases
-
-### 4. Cross-Contract Safety
-- **Pattern**: Always validate caller contract address
-- **Documentation**: Explicitly note which contracts can call which functions
-- **Future**: Add optional marketplace address storage in financing_pool for v2
-
-### 5. Storage Efficiency
-- **Review**: Minimize storage reads for hot paths
-- **Cache**: Load full config once per function vs. individual fields
-- **TTL**: Ensure all persistent keys have proper TTL management
-
----
-
-## Testing Strategy
-
-### Unit Tests
-- Individual function correctness
-- Error path coverage
-- Boundary value testing
-
-### Integration Tests
-- Cross-contract interactions
-- End-to-end workflows
-- Fee collection flows
-
-### Property-Based Tests
-- Arithmetic properties (commutativity, associativity where applicable)
-- Invariant preservation (total invested = pool balance, etc.)
-
-### Snapshot Tests
-- Test snapshots in `/contracts/*/test_snapshots/` ensure exact behavior
-- Run: `cargo test --all`
-- Review diffs on test changes
-
----
-
-## Implementation Priority
-
-1. **Phase 1** (Critical): Fix any remaining arithmetic edge cases
-2. **Phase 2** (High): Add comprehensive documentation
-3. **Phase 3** (Medium): Optimize hot paths
-4. **Phase 4** (Low): Add stretch tests for corner cases
-
----
-
-## Validation Checklist
-
-Before submitting each PR:
-- [ ] All public functions have comprehensive doc comments
-- [ ] No unsafe arithmetic operations (all use checked_*)
-- [ ] All error paths are tested
-- [ ] Test coverage ≥ 95% for modified code
-- [ ] `make fmt` runs without warnings
-- [ ] `make lint` passes with no clippy warnings
-- [ ] `make test` passes all tests
-- [ ] PR description includes `Closes #{issue_number}`
+  /// - Op
