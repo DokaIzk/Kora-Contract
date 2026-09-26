@@ -2,11 +2,29 @@
 # Kora Protocol — Makefile
 # =============================================================================
 
-.PHONY: build test clean fmt lint check audit coverage deploy-testnet deploy-mainnet fuzz fuzz-deep help build-optimized test-verbose setup sizes
+.PHONY: build test clean fmt lint check audit coverage coverage-per-contract deploy-testnet deploy-mainnet fuzz fuzz-deep help build-optimized test-verbose setup sizes
 
 WASM_TARGET := wasm32-unknown-unknown
 CONTRACTS   := access_control invoice_nft marketplace financing_pool treasury risk_registry
 COVERAGE_MIN ?= 95
+
+# Per-contract coverage floors (issue #683).
+#
+# A workspace-wide aggregate can let one well-tested contract mask a poorly
+# tested one, so each contract crate gets its own explicit minimum. Floors are
+# set at (or just below) current levels and ratcheted up via follow-ups; they
+# layer on top of the workspace-wide COVERAGE_MIN and D89's coverage-delta gate.
+#
+# Per-contract exceptions (thin wrapper / less testable surface area):
+#   access_control  — thin role/permission wrapper, lower floor documented here.
+#   risk_registry   — thin registry wrapper, lower floor documented here.
+# Override any floor on the command line, e.g. COVERAGE_MIN_TREASURY=90.
+COVERAGE_MIN_ACCESS_CONTROL   ?= 85
+COVERAGE_MIN_INVOICE_NFT      ?= 95
+COVERAGE_MIN_MARKETPLACE      ?= 95
+COVERAGE_MIN_FINANCING_POOL   ?= 95
+COVERAGE_MIN_TREASURY         ?= 95
+COVERAGE_MIN_RISK_REGISTRY    ?= 85
 
 # Fuzzing knobs (see contracts/fuzz/README.md)
 FUZZ_ITERS  ?= 10000
@@ -28,6 +46,7 @@ help:
 	@echo "  fuzz                 Run deterministic fuzz tests with seed corpus"
 	@echo "  fuzz-deep            Run libFuzzer deep fuzz testing (nightly required)"
 	@echo "  coverage             Run code coverage analysis (requires cargo-tarpaulin)"
+	@echo "  coverage-per-contract  Enforce per-contract coverage floors (issue #683)"
 	@echo ""
 	@echo "Code quality targets:"
 	@echo "  fmt                  Format all Rust code using cargo fmt"
@@ -51,6 +70,7 @@ help:
 	@echo "  make test"
 	@echo "  make fuzz FUZZ_ITERS=50000"
 	@echo "  make coverage COVERAGE_MIN=85"
+	@echo "  make coverage-per-contract COVERAGE_MIN_TREASURY=90"
 
 # ── Build ─────────────────────────────────────────────────────────────────────
 
@@ -175,6 +195,43 @@ coverage:
 	else \
 		echo "Coverage $$coverage% meets threshold of $(COVERAGE_MIN)%"; \
 	fi
+
+# ── Per-Contract Coverage Enforcement (Issue #683) ─────────────────────────────
+#
+# Enforces an explicit minimum coverage floor per contract crate so a single
+# well-tested contract cannot mask a poorly-tested one in the workspace-wide
+# aggregate. Runs on top of `make coverage` (workspace floor) and D89's
+# coverage-delta gate. Fails the build if any contract falls below its floor.
+#
+#   make coverage-per-contract
+#   make coverage-per-contract COVERAGE_MIN_TREASURY=90
+coverage-per-contract:
+	@echo "Enforcing per-contract coverage floors (issue #683)..."
+	@failed=0; \
+	for c in $(CONTRACTS); do \
+		pkg="kora-$$(echo $$c | tr '_' '-')"; \
+		var="COVERAGE_MIN_$$(echo $$c | tr '[:lower:]' '[:upper:]')"; \
+		floor=$$(eval echo \$$$$var); \
+		out="/tmp/coverage_$$c.txt"; \
+		cargo tarpaulin -p "$$pkg" --timeout 300 --out Stdout > "$$out" 2>&1; \
+		cov=$$(grep -oP 'Coverage: \K[0-9.]+' "$$out" | head -1); \
+		if [ -z "$$cov" ]; then \
+			echo "  $$c: ERROR — could not parse coverage"; \
+			failed=1; \
+			continue; \
+		fi; \
+		if (( $$(echo "$$cov < $$floor" | bc -l) )); then \
+			echo "  $$c: $$cov% < floor $$floor%  FAIL"; \
+			failed=1; \
+		else \
+			echo "  $$c: $$cov% >= floor $$floor%  OK"; \
+		fi; \
+	done; \
+	if [ "$$failed" -ne 0 ]; then \
+		echo "Per-contract coverage gate failed (issue #683)"; \
+		exit 1; \
+	fi; \
+	echo "All contracts meet their coverage floors"
 
 # ── Clean ─────────────────────────────────────────────────────────────────────
 

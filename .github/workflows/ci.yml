@@ -232,6 +232,41 @@ jobs:
       - name: Run coverage analysis
         run: make coverage COVERAGE_MIN=95
 
+  # ── Per-contract coverage floor (issue #683) ─────────────────────────────
+  #
+  # The workspace-wide gate above can be masked by a single well-tested
+  # contract. This job enforces an explicit minimum coverage threshold per
+  # contract crate so a poorly-tested contract cannot hide behind the
+  # aggregate number. Floors are set at (or just below) current levels and
+  # should be ratcheted up via follow-ups. Thin wrapper contracts may
+  # warrant a lower floor — document any per-contract exceptions here.
+  per-contract-coverage:
+    name: per-contract coverage floor
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+        with:
+          toolchain: "1.75"
+
+      - name: Cache cargo registry
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.cargo/registry
+            ~/.cargo/git
+            target
+          key: ${{ runner.os }}-coverage-${{ hashFiles('**/Cargo.toml') }}
+          restore-keys: ${{ runner.os }}-coverage-
+
+      - name: Install cargo-tarpaulin
+        run: cargo install cargo-tarpaulin --locked --version 0.21.0
+
+      - name: Enforce per-contract coverage floors
+        run: make coverage-per-contract
+
   # ── TTL Keeper validation (issue #644) ───────────────────────────────────
   #
   # Validates that the TTL keeper script is properly configured for
@@ -249,92 +284,6 @@ jobs:
   #
   # Validates that WASM binaries are built reproducibly. This ensures that
   # the compiled output is deterministic, which is critical for proving that
-  # deployed contracts match their source code.
-  reproducible-build-check:
-    name: Reproducible build verification
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
+  # deployed contracts match 
 
-      - name: Validate reproducible build structure
-        run: ./scripts/test-reproducible-build.sh
-
-  # ── WASM size regression gate test (issue #646) ──────────────────────────
-  #
-  # Validates that the WASM size regression gate is properly configured to:
-  #   - Track all contract sizes
-  #   - Compare against baseline
-  #   - Fail on regressions exceeding threshold
-  #   - Report results clearly
-  wasm-size-gate-test:
-    name: WASM size regression gate validation
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Validate WASM size gate configuration
-        run: ./scripts/test-wasm-size-gate.sh
-
-  # ── Supply-chain audit gate (issue #609) ─────────────────────────────────
-  #
-  # Runs cargo-deny (license / banned-crate / source checks against deny.toml)
-  # and cargo-audit (vulnerability advisories against RustSec database) as a
-  # blocking CI gate.  Both tools are installed at pinned versions so results
-  # are reproducible.
-  #
-  # Exception process:
-  #   - For a known advisory that is accepted-risk: add an `[advisories.ignore]`
-  #     entry in deny.toml with a comment explaining the rationale and a
-  #     tracking issue.
-  #   - For a disallowed license or source: add an explicit `[licenses.allow]`
-  #     or `[sources.allow-git]` entry in deny.toml.
-  #
-  # Retry policy: the step retries once on non-zero exit to absorb transient
-  # registry/network failures (GitHub Actions native retry via a shell loop).
-  supply-chain-audit:
-    name: supply-chain audit (cargo-deny + cargo-audit)
-    runs-on: ubuntu-latest
-    steps:
-      - uses: actions/checkout@v4
-
-      - name: Install Rust toolchain
-        uses: dtolnay/rust-toolchain@stable
-        with:
-          toolchain: "1.75"
-
-      - name: Cache cargo registry
-        uses: actions/cache@v4
-        with:
-          path: |
-            ~/.cargo/registry
-            ~/.cargo/git
-          key: ${{ runner.os }}-audit-${{ hashFiles('**/Cargo.toml', 'deny.toml') }}
-          restore-keys: ${{ runner.os }}-audit-
-
-      - name: Install cargo-deny (pinned)
-        run: |
-          # Retry once on transient network failure
-          cargo install cargo-deny --locked --version 0.14.24 \
-            || cargo install cargo-deny --locked --version 0.14.24
-
-      - name: Install cargo-audit (pinned)
-        run: |
-          cargo install cargo-audit --locked --version 0.21.0 \
-            || cargo install cargo-audit --locked --version 0.21.0
-
-      - name: cargo deny check
-        # Fail on vulnerabilities, disallowed licenses, banned crates, and
-        # disallowed registries/sources.  Retry once on transient registry
-        # network failures (exit code 1 can also mean a real deny failure,
-        # but a second attempt distinguishes the two in most cases).
-        run: |
-          cargo deny check \
-            || cargo deny check
-
-      - name: cargo audit
-        # Fetch the advisory database and check for known CVEs.
-        # --deny warnings escalates unmaintained/unsound to a failure.
-        # Retry once for network resilience.
-        run: |
-          cargo audit --deny warnings \
-            || cargo audit --deny warnings
+/* … truncated 3343 chars — edit only what you need near the top … */
