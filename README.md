@@ -344,3 +344,6 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-685 -->
 - #685: [High] Add a Regression Test Suite Replaying Historical Testnet Transactions
+
+<!-- handsoff-issue-686 -->
+- #686: [High] Build a Chaos-Testing Harness for Simulated TTL Expiry Mid-Flow
