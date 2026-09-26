@@ -344,3 +344,6 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-756 -->
 - #756: [High] Build Notification Service for Invoice Lifecycle Events
+
+<!-- handsoff-issue-758 -->
+- #758: [High] Build Debtor Identity Verification Microservice
