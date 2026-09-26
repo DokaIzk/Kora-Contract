@@ -347,3 +347,9 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-686 -->
 - #686: [High] Build a Chaos-Testing Harness for Simulated TTL Expiry Mid-Flow
+
+<!-- handsoff-issue-756 -->
+- #756: [High] Build Notification Service for Invoice Lifecycle Events
+
+<!-- handsoff-issue-758 -->
+- #758: [High] Build Debtor Identity Verification Microservice

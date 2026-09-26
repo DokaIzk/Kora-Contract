@@ -1,5 +1,5 @@
 use crate::audit::AdminAuditEntry;
-use crate::types::RiskTier;
+use crate::types::{InvoiceStatus, RiskTier};
 use soroban_sdk::{symbol_short, Address, Bytes, Env, String, Symbol, Vec};
 
 // ── Event Schema Version (#583) ───────────────────────────────────────────────
@@ -171,6 +171,14 @@ pub fn risk_score_refreshed(
             new_tier.clone(),
             env.ledger().timestamp(),
         ),
+    );
+}
+
+pub fn invoice_archived(env: &Env, invoice_id: u64, sme: &Address, amount: i128, _status: InvoiceStatus) {
+    emit(
+        env,
+        symbol_short!("INV_ARC"),
+        (invoice_id, sme.clone(), amount, env.ledger().timestamp()),
     );
 }
 
@@ -379,6 +387,26 @@ pub fn admin_transferred(env: &Env, actor: &Address, new_admin: &Address) {
         env,
         symbol_short!("ADM_TRF"),
         (actor.clone(), new_admin.clone(), env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when an admin proposes a two-step admin transfer (#213).
+/// Schema: (proposer, proposed, timestamp)
+pub fn admin_proposed(env: &Env, proposer: &Address, proposed: &Address) {
+    emit(
+        env,
+        symbol_short!("ADM_PRP"),
+        (proposer.clone(), proposed.clone(), env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when a pending admin proposal is cancelled (#213).
+/// Schema: (admin, timestamp)
+pub fn admin_proposal_cancelled(env: &Env, admin: &Address) {
+    emit(
+        env,
+        symbol_short!("ADM_CXL"),
+        (admin.clone(), env.ledger().timestamp()),
     );
 }
 

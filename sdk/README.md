@@ -78,3 +78,83 @@ console.log("Treasury collected fees:", collected);
 | `kora.riskRegistry` | `risk_registry` — SME/verifier management |
 | `kora.accessControl` | `access_control` — pause/unpause, roles |
 | `kora.priceOracle` | `price_oracle` — asset prices |
+
+## Public API (third-party integrators)
+
+The SDK also ships a typed client for the **rate-limited public API tier**
+(`services/public-api/`), which sits in front of the core API gateway and is
+intended for external integrators (factoring partners, analytics providers).
+Unlike the internal service-to-service APIs, every request is authenticated
+with an API key, metered per key, and rate limited according to the key's tier.
+
+### Issuing a key
+
+Keys are issued self-service or admin-approved and carry a configurable tier
+that determines the rate limit and quota:
+
+```ts
+import { PublicApiClient } from "@kora-protocol/sdk";
+
+// Self-service issuance (returns the plaintext key exactly once).
+const { key, tier } = await PublicApiClient.issueKey({
+  label: "acme-factoring",
+  tier: "partner", // "free" | "partner" | "enterprise"
+});
+
+// Admin-approved issuance with a custom tier limit.
+const approved = await PublicApiClient.issueKey({
+  label: "acme-analytics",
+  tier: "enterprise",
+  requestsPerMinute: 6_000,
+  approvedBy: "admin@kora.example",
+});
+```
+
+### Calling the versioned API
+
+All public endpoints are versioned under `/v1/...` so the surface can evolve
+without breaking existing integrations:
+
+```ts
+const api = new PublicApiClient({
+  baseUrl: "https://api.kora.example",
+  apiKey: key,
+});
+
+const invoice = await api.v1.invoices.get(invoiceId);
+const page    = await api.v1.invoices.list({ status: "Listed", limit: 50 });
+```
+
+### Rate limits and metering
+
+Rate limiting uses a per-key token bucket (sliding-window refill) sized by the
+key's tier. Every request is metered and written to a queryable usage store for
+reporting:
+
+```ts
+const usage = await api.v1.usage.get({ from: "2024-01-01", to: "2024-02-01" });
+console.log(usage.requests, usage.rateLimited, usage.remaining);
+```
+
+When a key exceeds its tier limit the API responds with `429 Too Many Requests`
+and `Retry-After` / `X-RateLimit-*` headers.
+
+### Revocation
+
+Revoked keys are rejected immediately — there is no stale-token grace period.
+Revocation takes effect on the next request:
+
+```ts
+await PublicApiClient.revokeKey(key); // effective immediately
+```
+
+### Versioning & deprecation policy
+
+- The public surface is versioned by path prefix (`/v1/...`).
+- New, non-breaking fields and endpoints are added within the current version.
+- Breaking changes ship under a new version prefix (`/v2/...`); the previous
+  version remains available for a documented deprecation window.
+- Deprecated endpoints return a `Deprecation` header and are announced in the
+  changelog before removal.
+
+> Out of scope: billing/monetization of API access.

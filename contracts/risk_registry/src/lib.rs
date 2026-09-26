@@ -82,6 +82,7 @@ pub const MIN_SCORE_UPDATE_INTERVAL: u64 = 3_600; // 1 hour
 #[contracttype]
 pub enum DataKey {
     Admin,
+    PendingAdmin,
     InvoiceNft, // authorized caller for increment_invoice_count
     StakingToken, // token contract for verifier stakes
     MinimumStake, // minimum stake amount required to become verifier
@@ -193,6 +194,27 @@ impl RiskRegistryContract {
     pub fn transfer_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), RiskRegistryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
+        if admin == new_admin {
+            return Err(KoraError::InvalidAddress);
+        }
+        kora_shared::validation::require_not_self(&env, &new_admin)?;
+        env.storage().persistent().set(&DataKey::PendingAdmin, &new_admin);
+        Self::bump_persistent(&env, &DataKey::PendingAdmin);
+        events::admin_proposed(&env, &admin, &new_admin);
+        Ok(())
+    }
+
+    /// Step 2: proposed new admin accepts, completing the transfer.
+    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), KoraError> {
+        new_admin.require_auth();
+        let pending: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::PendingAdmin)
+            .ok_or(KoraError::NoPendingAdminProposal)?;
+        if pending != new_admin {
+            return Err(KoraError::NotPendingAdmin);
+        }
         env.storage().persistent().set(&DataKey::Admin, &new_admin);
         Self::bump_persistent(&env, &DataKey::Admin);
         events::admin_transferred(&env, &admin, &new_admin);
@@ -223,6 +245,18 @@ impl RiskRegistryContract {
             .persistent()
             .set(&DataKey::InvoiceNft, &invoice_nft);
         Self::bump_persistent(&env, &DataKey::InvoiceNft);
+        Ok(())
+    }
+
+    /// Cancel a pending admin proposal. Current admin only.
+    pub fn cancel_admin_proposal(env: Env, admin: Address) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        if !env.storage().persistent().has(&DataKey::PendingAdmin) {
+            return Err(KoraError::NoPendingAdminProposal);
+        }
+        env.storage().persistent().remove(&DataKey::PendingAdmin);
+        events::admin_proposal_cancelled(&env, &admin);
         Ok(())
     }
 
@@ -1560,7 +1594,7 @@ mod tests {
         assert!(client.try_initialize(&admin, &invoice_nft, &staking_token, &1_000_000i128, &5_000u32).is_err());
     }
 
-    // ── transfer_admin ────────────────────────────────────────────────────────
+    // ── propose_admin / accept_admin ──────────────────────────────────────────
 
     #[test]
     fn test_transfer_admin_success() {
@@ -1575,7 +1609,25 @@ mod tests {
         let (env, _, _, _, client) = setup();
         let stranger = Address::generate(&env);
         let new_admin = Address::generate(&env);
-        assert!(client.try_transfer_admin(&stranger, &new_admin).is_err());
+        assert!(client.try_propose_admin(&stranger, &new_admin).is_err());
+    }
+
+    #[test]
+    fn test_accept_admin_wrong_caller_fails() {
+        let (env, admin, _, client) = setup();
+        let new_admin = Address::generate(&env);
+        let impostor = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin).unwrap();
+        assert!(client.try_accept_admin(&impostor).is_err());
+    }
+
+    #[test]
+    fn test_cancel_admin_proposal() {
+        let (env, admin, _, client) = setup();
+        let new_admin = Address::generate(&env);
+        client.propose_admin(&admin, &new_admin).unwrap();
+        client.cancel_admin_proposal(&admin).unwrap();
+        assert!(client.try_accept_admin(&new_admin).is_err());
     }
 
     // ── add_verifier / remove_verifier ────────────────────────────────────────

@@ -65,6 +65,10 @@ pub enum KoraError {
     ComplianceNotAttested = 53,
     SMENotVerified = 129,
 
+    // Two-step admin transfer
+    NoPendingAdminProposal = 44,
+    NotPendingAdmin = 45,
+
     // General
     ArithmeticOverflow = 90,
     ArithmeticUnderflow = 91,
