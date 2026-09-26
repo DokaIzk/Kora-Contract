@@ -1,0 +1,96 @@
+/**
+ * Keeper Service — Entry Point
+ *
+ * Wires together JobStore, Dispatcher, and Scheduler.
+ * Exposes a minimal HTTP status endpoint for observability.
+ *
+ * Issue #765
+ */
+
+import * as http from "http";
+import * as dotenv from "dotenv";
+import { JobStore } from "./jobStore";
+import { Dispatcher } from "./dispatcher";
+import { Scheduler } from "./scheduler";
+import { KeeperConfig } from "./types";
+import pino from "pino";
+
+dotenv.config();
+
+const logger = pino({ name: "keeper" });
+
+function loadConfig(): KeeperConfig {
+  return {
+    rpcUrl: process.env.STELLAR_RPC_URL ?? "https://soroban-testnet.stellar.org",
+    keeperSecret: process.env.KEEPER_SECRET ?? "",
+    dbPath: process.env.KEEPER_DB_PATH ?? "./keeper-jobs.db",
+    pollIntervalMs: Number(process.env.KEEPER_POLL_INTERVAL_MS ?? "30000"),
+    maxAttempts: Number(process.env.KEEPER_MAX_ATTEMPTS ?? "5"),
+    retryBackoffBaseMs: Number(process.env.KEEPER_RETRY_BACKOFF_BASE_MS ?? "60000"),
+    networkPassphrase:
+      process.env.STELLAR_NETWORK_PASSPHRASE ??
+      "Test SDF Network ; September 2015",
+  };
+}
+
+async function main(): Promise<void> {
+  const config = loadConfig();
+
+  if (!config.keeperSecret) {
+    logger.error("KEEPER_SECRET env var is required");
+    process.exit(1);
+  }
+
+  const store = new JobStore(config.dbPath);
+  const dispatcher = new Dispatcher(config);
+  const scheduler = new Scheduler(store, dispatcher, config);
+
+  scheduler.start();
+
+  // ── Observability HTTP server ────────────────────────────────────────────
+  const server = http.createServer((req, res) => {
+    if (req.url === "/health") {
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ status: "ok" }));
+      return;
+    }
+
+    if (req.url === "/status") {
+      const counts = store.getStatusCounts();
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ counts }));
+      return;
+    }
+
+    if (req.url === "/history") {
+      const history = store.getHistory(200);
+      res.writeHead(200, { "Content-Type": "application/json" });
+      res.end(JSON.stringify({ history }));
+      return;
+    }
+
+    res.writeHead(404);
+    res.end();
+  });
+
+  const port = Number(process.env.KEEPER_HTTP_PORT ?? "8080");
+  server.listen(port, () => {
+    logger.info({ port }, "Keeper observability server listening");
+  });
+
+  // ── Graceful shutdown ───────────────────────────────────────────────────
+  const shutdown = (): void => {
+    logger.info("Shutting down keeper service…");
+    scheduler.stop();
+    store.close();
+    server.close(() => process.exit(0));
+  };
+
+  process.on("SIGTERM", shutdown);
+  process.on("SIGINT", shutdown);
+}
+
+main().catch((err) => {
+  logger.error(err, "Keeper service crashed");
+  process.exit(1);
+});
