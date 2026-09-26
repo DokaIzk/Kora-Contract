@@ -331,3 +331,13 @@ Built with [Stellar Soroban](https://soroban.stellar.org). Inspired by the real-
 
 <!-- handsoff-issue-722 -->
 - #722: [High] Implement Partial Repayment Support in Financing Pool
+<!-- handsoff-issue-726 -->
+- #726: [High] Implement Cross-Invoice Portfolio Diversification Cap in Marketplace
+
+<!-- handsoff-issue-727 -->
+- #727: [High] Build Automated Default Detection and Liquidation Trigger
+<!-- handsoff-issue-728 -->
+- #728: [High] Implement Tiered Protocol Fee Structure Based on Investor Volume
+
+<!-- handsoff-issue-733 -->
+- #733: [High] Add Multi-Asset (Multi-Token) Support to Financing Pool

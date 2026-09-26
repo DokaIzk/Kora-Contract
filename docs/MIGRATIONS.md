@@ -1,37 +1,118 @@
-# Schema Migrations
+# Contract Migrations & Timelocked Upgrades
 
-This document tracks breaking changes to persistent storage layouts and required data migrations.
+This document describes the standardized, timelocked upgrade mechanism used across
+all Kora contracts. It is the reference for operators, auditors, and integrators
+who need to understand how WASM upgrades and storage migrations are proposed,
+reviewed, and executed.
 
-## ParameterProposal schema change (PR #XXX, Issue #490)
+## Motivation
 
-### Change
-Added `expires_at: u64` field to `ParameterProposal` struct in `contracts/shared/src/types.rs`.
+Instant, admin-triggered upgrades are a major trust concern for institutional
+investors (see `THREAT_MODEL.md`). A timelock gives the community and auditors a
+window to review and react to a proposed upgrade before it takes effect. Every
+upgrade is therefore:
 
-### Migration Notes
-- **Already-deployed instances:** Existing ParameterProposal entries in storage lack the `expires_at` field.
-- **Safe handling:** The field default (missing = 0) makes old proposals immediately expired, preventing execution.
-- **Best practice:** After contract upgrade, re-propose any critical pending parameter changes with fresh TTL.
-- **No data loss:** Old entries remain readable via `get_parameter_proposal` but cannot be voted on or executed after expiry.
+1. **Proposed** on-chain and publicly visible.
+2. **Delayed** by a configurable, admin-set interval.
+3. **Executable** only after the delay has elapsed.
+4. **Cancellable** by the admin before execution.
 
-### Timeline
-- ParameterProposal TTL: ~7 days (PROPOSAL_TTL_LEDGERS = 120_960 ledgers at ~5s/ledger)
-- Proposals expire after creation time + TTL
-- Expired proposals cannot be voted on or executed
+On-chain governance voting over upgrades is intentionally out of scope here and
+is tracked separately under Governance.
 
-## Multisig Direct-Call Blocking (PR #XXX, Issue #487)
+## The Shared `Timelock` Module
 
-### Change
-Added `DirectCallProhibited` error. Once a multisig is configured via `configure_multisig`, direct admin calls to:
-- `pause()`
-- `unpause()`
-- `grant_role()`
-- `revoke_role()`
-- `transfer_admin()`
+The mechanism lives in `contracts/shared/src/timelock.rs` and is re-exported from
+`contracts/shared/src/lib.rs` so that every contract can adopt it from its upgrade
+entrypoint without duplicating logic.
 
-...are blocked and must route through `propose_action → approve_action → execute_action`.
+### Data Model
 
-### Migration Notes
-- **No storage change:** Existing state is unaffected.
-- **Behavior change:** Direct calls fail with `DirectCallProhibited` after multisig is active.
-- **Before multisig:** All direct admin calls work normally.
-- **After multisig:** Must use propose/approve/execute flow (intentional security hardening).
+```rust
+pub struct UpgradeProposal {
+    pub id: u64,
+    pub wasm_hash: BytesN<32>,
+    pub proposer: Address,
+    pub proposed_at: u64,
+    pub executed: bool,
+    pub cancelled: bool,
+}
+```
+
+Proposals are stored in persistent storage keyed by their monotonically
+increasing `id`. The configured delay is stored separately and is settable by the
+admin.
+
+### API
+
+| Function | Description |
+| --- | --- |
+| `propose_upgrade(env, admin, wasm_hash) -> u64` | Records the proposed WASM hash, proposer, and `proposed_at` timestamp. Returns the new proposal `id`. Emits an `upgrade_proposed` event. |
+| `execute_upgrade(env, admin, id)` | Executes a proposal only when `env.ledger().timestamp() >= proposed_at + delay`. Emits an `upgrade_executed` event. |
+| `cancel_upgrade(env, admin, id)` | Cancels a pending proposal before execution. Emits an `upgrade_cancelled` event. |
+| `set_upgrade_delay(env, admin, delay)` | Sets the configurable upgrade delay (admin only). |
+| `get_upgrade_delay(env) -> u64` | Returns the currently configured delay. |
+| `get_proposal(env, id) -> UpgradeProposal` | Returns a stored proposal for inspection. |
+
+### Delay Semantics
+
+- A sane default delay is applied on initialization.
+- The admin may adjust the delay via `set_upgrade_delay`.
+- `execute_upgrade` reverts with an early-execution error when
+  `env.ledger().timestamp() < proposed_at + delay`.
+
+### Edge Cases & Constraints
+
+- **Early execution is rejected.** Calling `execute_upgrade` before the delay has
+  elapsed fails.
+- **Replay is prevented.** A proposal that has already been executed cannot be
+  executed again; the `executed` flag is checked and set atomically.
+- **Cancellation is supported.** A pending proposal may be cancelled by the admin
+  and can no longer be executed.
+- **Unknown ids are rejected.** Executing or cancelling a non-existent proposal
+  fails.
+
+## Adopting the Module in a Contract
+
+Each contract's upgrade entrypoint should delegate to the shared module rather
+than performing an immediate upgrade:
+
+```rust
+// propose
+let id = timelock::propose_upgrade(&env, admin.clone(), new_wasm_hash.clone());
+
+// later, after the delay has elapsed
+let proposal = timelock::get_proposal(&env, id);
+if env.ledger().timestamp() < proposal.proposed_at + timelock::get_upgrade_delay(&env) {
+    panic!("upgrade delay has not elapsed");
+}
+timelock::execute_upgrade(&env, admin.clone(), id);
+```
+
+## Events
+
+Both proposal and execution emit events so that off-chain monitors and the
+community can observe the full lifecycle:
+
+- `upgrade_proposed` — emitted when a proposal is created.
+- `upgrade_executed` — emitted when a proposal is executed.
+- `upgrade_cancelled` — emitted when a proposal is cancelled.
+
+## Testing Requirements
+
+Adopting contracts must maintain a minimum of 90% coverage over the timelock
+paths. At a minimum, tests must cover:
+
+- **Early-execution rejection** — executing before the delay elapses fails.
+- **Cancellation** — a cancelled proposal cannot be executed.
+- **Successful post-delay execution** — a proposal executes once the delay has
+  elapsed.
+- **Replay prevention** — an executed proposal cannot be executed again.
+
+## Operational Checklist
+
+1. Propose the upgrade and record the returned `id`.
+2. Announce the proposal and the intended execution time to the community.
+3. Wait for the configured delay to elapse.
+4. Execute the upgrade (or cancel it if concerns are raised).
+5. Verify the emitted `upgrade_executed` event and the new WASM hash.

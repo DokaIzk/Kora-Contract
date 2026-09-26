@@ -220,6 +220,63 @@ Returns all investor positions for an invoice.
 
 ---
 
+## `price_oracle`
+
+### `initialize(admin, access_control)`
+
+One-time setup. Sets the admin address and the access control contract address.
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `admin` | `Address` | Protocol admin |
+| `access_control` | `Address` | Deployed access_control contract |
+
+Fails with `AlreadyInitialized` if called more than once.
+
+---
+
+### `set_rate_curve(caller, points)`
+
+Replaces the tenor-based discount-rate curve. Caller must be admin or a whitelisted verifier.
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `points` | `Vec<(u32, u32)>` | `(tenor_days, rate_bps)` pairs. Must be non-empty, strictly increasing in `tenor_days`, and at most `MAX_CURVE_POINTS` (16) entries. |
+
+Stores the curve in a bounded, sorted vector and records the update timestamp for staleness checks. Rejects out-of-order or non-monotonic tenor inputs with `InvalidCurve`. Rejects curves exceeding the point bound with `TooManyCurvePoints`.
+
+Errors: `Unauthorized`, `InvalidCurve`, `TooManyCurvePoints`, `ProtocolPaused`
+
+---
+
+### `rate_for_tenor(days) → u32`
+
+Returns the discount rate in basis points for a given tenor in days.
+
+| Param | Type | Description |
+|-------|------|-------------|
+| `days` | `u32` | Days to maturity. |
+
+Uses deterministic integer linear interpolation between the two surrounding curve points. Flat extrapolation is applied at both edges: tenors at or below the first point return the first rate, and tenors at or above the last point return the last rate. No floating-point math is used.
+
+Errors: `CurveNotSet`
+
+---
+
+### `get_rate_curve() → Vec<(u32, u32)>`
+
+Returns the stored `(tenor_days, rate_bps)` curve points.
+
+Errors: `CurveNotSet`
+
+---
+
+### `get_curve_updated_at() → u64`
+
+Returns the ledger timestamp of the last curve update, for staleness checks.
+
+---
+
 ## `treasury`
 
 ### `initialize(admin, fee_bps)`
@@ -304,162 +361,6 @@ Increments the default counter for an SME. Admin only.
 
 ### `set_debtor_score(verifier, debtor_hash, score)`
 
-Stores a risk score for a debtor (keyed by hash). Verifier only.
+Stores a risk score for a debtor (keyed by ha
 
----
-
-### `get_sme_profile(sme) → SmeProfile`
-
-Returns the full SME profile.
-
-Errors: `SMENotRegistered`
-
----
-
-### `is_verified_sme(sme) → bool`
-
-Returns `true` if the SME is registered and verified.
-
----
-
-### `is_verifier(verifier) → bool`
-
-Returns `true` if the address is a whitelisted verifier.
-
----
-
-## `access_control`
-
-### `initialize(admin)`
-
-One-time setup. Grants `Role::Admin` to the admin address.
-
----
-
-### `pause(admin)` / `unpause(admin)`
-
-Toggle the protocol pause state. Admin only.
-
----
-
-### `grant_role(admin, target, role)` / `revoke_role(admin, target)`
-
-Manage roles. Admin only.
-
-Roles: `Admin`, `Operator`, `Verifier`, `None`
-
----
-
-### `transfer_admin(current_admin, new_admin)`
-
-Transfers admin rights. Current admin must sign.
-
----
-
-### `is_paused() → bool`
-
-Returns the current pause state.
-
----
-
-### `get_role(address) → Role`
-
-Returns the role assigned to an address.
-
----
-
-### `get_admin() → Address`
-
-Returns the current admin address.
-
-Errors: `NotInitialized`
-
----
-
-## `price_oracle`
-
-Mock/testnet-compatible price oracle for cross-currency conversion. Prices are stored as stroops-scaled values (1e7 = 1.0). The oracle rejects reads of prices older than 3600 seconds (1 hour) to prevent stale-price exploits.
-
-### `initialize(admin)`
-
-One-time setup.
-
----
-
-### `set_price(admin, base, quote, price)`
-
-Set the exchange rate for a currency pair. Admin only. Price is `base` per 1 `quote`, scaled by 1e7.
-
-| Param | Type | Description |
-|-------|------|-------------|
-| `base` | `Symbol` | Base currency symbol (e.g. `EURC`) |
-| `quote` | `Symbol` | Quote currency symbol (e.g. `USDC`) |
-| `price` | `i128` | Exchange rate scaled by 1e7 |
-
-Errors: `NotAdmin`, `InvalidAmount`
-
----
-
-### `get_price(base, quote) → PriceData`
-
-Returns the price and its timestamp. Fails if the price is stale (> 1 hour) or missing.
-
-Errors: `InvalidAmount` (missing), `InvoiceExpired` (stale)
-
----
-
-### `convert(amount, from, to) → i128`
-
-Convert an amount between currencies. Returns the same amount if `from == to`. Uses `get_price` internally, so it inherits staleness checks.
-
-Errors: `InvalidAmount`, `InvoiceExpired`, `ArithmeticOverflow`
-
----
-
-## Error Code Reference
-
-All `KoraError` variants are `#[repr(u32)]`. The numeric values are stable on-chain and must not be changed without a documented migration.
-
-| Code | Variant | Description |
-|------|---------|-------------|
-| 1 | `Unauthorized` | Caller lacks permission for this action |
-| 2 | `NotAdmin` | Caller is not the protocol admin |
-| 3 | `NotVerifier` | Caller is not a whitelisted verifier |
-| 4 | `ProtocolPaused` | Operation blocked while protocol is paused |
-| 5 | `AlreadyPaused` | Protocol is already in paused state |
-| 6 | `NotPaused` | Protocol is not currently paused |
-| 7 | `RoleNotAssigned` | No role is assigned to the given address |
-| 10 | `InvoiceNotFound` | Invoice ID does not exist |
-| 11 | `InvoiceAlreadyExists` | Invoice ID is already in use |
-| 12 | `InvalidInvoiceStatus` | Invoice is in the wrong state for this transition |
-| 13 | `InvoiceExpired` | Invoice due date has passed |
-| 14 | `InvalidAmount` | Amount is zero, negative, or out of range |
-| 15 | `InvalidDueDate` | Due date is not strictly in the future |
-| 16 | `InvalidRiskScore` | Risk score is outside the 0–100 range |
-| 20 | `ListingNotFound` | Listing for the given invoice ID does not exist |
-| 21 | `ListingAlreadyCancelled` | Listing has already been cancelled |
-| 22 | `ListingExpired` | Listing funding deadline has passed |
-| 23 | `FundingDeadlinePassed` | Funding deadline has elapsed |
-| 24 | `InsufficientFunds` | Caller does not have enough balance |
-| 25 | `ExceedsFundingTarget` | Contribution would exceed the asking price |
-| 26 | `AlreadyFullyFunded` | Invoice has already reached its funding target |
-| 30 | `PoolNotFound` | Financing pool for the given invoice ID does not exist |
-| 31 | `PoolAlreadyClosed` | Pool has already been closed (repaid or defaulted) |
-| 32 | `RepaymentAlreadyMade` | A repayment is already in progress (reentrancy lock) |
-| 33 | `InsufficientPoolBalance` | Pool balance is too low for the requested withdrawal |
-| 40 | `InvalidFeeRate` | Fee rate exceeds 10 000 bps or violates range constraint |
-| 41 | `WithdrawalFailed` | Token transfer during withdrawal failed |
-| 42 | `TokenNotWhitelisted` | Token is not on the treasury whitelist |
-| 50 | `SMENotRegistered` | SME address has not been registered in the risk registry |
-| 51 | `DebtorNotRegistered` | Debtor hash has no recorded score |
-| 52 | `RiskScoreOutOfRange` | Score is outside 0–100 |
-| 90 | `ArithmeticOverflow` | A checked arithmetic operation overflowed |
-| 91 | `ArithmeticUnderflow` | A checked subtraction produced a negative result |
-| 92 | `InvalidAddress` | Address is self-referential or must be distinct from another |
-| 93 | `EmptyString` | A required string field is empty |
-| 94 | `AlreadyInitialized` | Contract has already been initialized |
-| 96 | `NotInitialized` | Contract has not been initialized yet |
-| 97 | `EmptyBytes` | A required bytes field is empty |
-| 98 | `Reentrancy` | Reentrancy guard triggered — concurrent call detected |
-| 100 | `NoUpgradeProposed` | No upgrade has been proposed |
-| 101 | `UpgradeTimelockNotElapsed` | Upgrade timelock period has not yet elapsed |
+/* … truncated 5307 chars — edit only what you need near the top … */
