@@ -1117,6 +1117,18 @@ impl RiskRegistryContract {
         Ok(avg as u32)
     }
 
+    /// Current risk tier for a debtor, derived from active verifier attestations.
+    /// `None` means no usable score; capped marketplace funding must reject it.
+    pub fn get_debtor_risk_tier(env: Env, debtor_hash: Bytes) -> Option<RiskTier> {
+        let score = Self::debtor_score_average(env.clone(), debtor_hash)?;
+        let limits = Self::get_current_risk_tier_definition(env);
+        Some(if score <= limits.aaa_max { RiskTier::AAA }
+            else if score <= limits.aa_max { RiskTier::AA }
+            else if score <= limits.a_max { RiskTier::A }
+            else if score <= limits.b_max { RiskTier::B }
+            else { RiskTier::C })
+    }
+
     /// Returns a specific verifier's score attestation for a debtor,
     /// or `RiskRegistryError::DebtorNotRegistered` if not found.
     pub fn get_debtor_score_attestation(
@@ -1453,7 +1465,7 @@ impl RiskRegistryContract {
         env.storage()
             .persistent()
             .get(&DataKey::CurrentRiskTierDefinition)
-            .unwrap_or_else(|_| Self::create_default_risk_tier_definition(&env))
+            .unwrap_or_else(|| Self::create_default_risk_tier_definition(&env))
     }
 
     /// Get a specific version of a risk tier definition (Issue #674).
