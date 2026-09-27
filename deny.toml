@@ -4,10 +4,12 @@
 # CI: this file is checked by the `supply-chain-audit` CI job (issue #609)
 # via `cargo deny check`.  Any failure blocks the PR merge.
 #
-# Exception process:
-#   - New security advisory (known, accepted-risk): add to `[advisories.ignore]`
-#     below with a comment that includes the advisory ID, a brief justification,
-#     and a link to a tracking issue.
+# Exception process (reviewed, time-bounded only):
+#   - New security advisory (accepted risk): add to `[advisories.ignore]`
+#     below with the advisory ID, reachability/impact analysis, owner, expiry
+#     date, and tracking issue. Obtain security-owner review before merging.
+#     Remove the exception as soon as the dependency is upgraded or the risk
+#     expires; never use a blanket wildcard.
 #   - Disallowed license: add to `[licenses.allow]` with a comment.
 #   - Disallowed crate source: add to `[sources.allow-git]` with a comment.
 #
