@@ -1,0 +1,31 @@
+{
+  "backupRoot": "/backups",
+  "services": {
+    "audit-log": {
+      "dbPathEnv": "AUDIT_DB_PATH",
+      "defaultDbPath": "./audit.db",
+      "verifyScript": "verify-chain"
+    },
+    "keeper": {
+      "dbPathEnv": "KEEPER_DB_PATH",
+      "defaultDbPath": "./keeper.db",
+      "verifyScript": "basic"
+    },
+    "reporting": {
+      "dbPathEnv": "REPORTING_DB_PATH",
+      "defaultDbPath": "./reporting.db",
+      "verifyScript": "basic"
+    }
+  },
+  "retention": {
+    "hot": { "intervalMinutes": 15, "maxAgeHours": 4 },
+    "warm": { "intervalHours": 1, "maxAgeDays": 7 },
+    "cold": { "intervalDays": 1, "maxAgeDays": 90, "timeUtc": "02:00" }
+  },
+  "verification": {
+    "auditLog": {
+      "verifyBinary": "node",
+      "verifyArgs": ["../services/audit-log/dist/verify.js", "--db"]
+    }
+  }
+}
