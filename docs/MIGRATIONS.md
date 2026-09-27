@@ -116,3 +116,62 @@ paths. At a minimum, tests must cover:
 3. Wait for the configured delay to elapse.
 4. Execute the upgrade (or cancel it if concerns are raised).
 5. Verify the emitted `upgrade_executed` event and the new WASM hash.
+
+---
+
+## invoice_nft Storage Schema History
+
+### v1 → v2 (notes field)
+
+`Invoice` gained `notes: Option<String>`. Pre-existing records stored as `InvoiceV1`
+(no `notes` field) are backfilled with `notes = None` by `migrate()`.
+
+### v2 → v3 — Hot/Cold Storage Split (issue #740)
+
+**Motivation:** Every status transition (`set_listed`, `set_funded`, `set_repaid`,
+`set_defaulted`) previously read and wrote the full `Invoice` struct, including
+large cold fields (`debtor_hash` up to 64 bytes, `ipfs_cid` up to 128 bytes,
+`metadata_hash` up to 32 bytes, `notes`). These fields are never needed during
+a status transition, so each call paid unnecessary ledger I/O cost.
+
+**Change:** The monolithic `Invoice(id)` persistent key is split into two keys:
+
+| Key | Type | Fields | Access pattern |
+|---|---|---|---|
+| `InvoiceHot(id)` | persistent | `id`, `sme`, `amount`, `currency`, `due_date`, `risk_score`, `risk_tier`, `status`, `created_at`, `funded_at`, `repaid_at` | Every status transition, exposure tracking, freeze checks |
+| `InvoiceCold(id)` | persistent | `debtor_hash`, `ipfs_cid`, `metadata_hash`, `notes` | `get_invoice`, `amend_invoice`, `update_metadata_cid`, `commit_metadata_hash`, `flag_metadata_mismatch` |
+
+`get_invoice` merges both keys into the public `Invoice` type — the external
+interface is unchanged and verified by `interface-compat.yml`.
+
+**Before/After resource estimates (per status transition call):**
+
+| Metric | v2 (full Invoice) | v3 (hot only) | Reduction |
+|---|---|---|---|
+| Persistent reads | 1 × ~300 byte struct | 1 × ~120 byte struct | ~60% |
+| Persistent writes | 1 × ~300 byte struct | 1 × ~120 byte struct | ~60% |
+| XDR decode cost | full Invoice fields | hot fields only | ~60% |
+| `get_invoice` reads | 1 key | 2 keys (hot + cold) | +1 read (acceptable) |
+
+**Migration runbook (v2 → v3):**
+
+1. Deploy the new WASM (after the 24-hour timelock via `propose_upgrade` / `execute_upgrade`).
+2. Call `migrate(admin)` immediately after the WASM swap.
+   - The function iterates every allocated invoice ID.
+   - For each `Invoice(id)` record found, it writes `InvoiceHot(id)` and `InvoiceCold(id)`,
+     then removes the legacy `Invoice(id)` key to reclaim rent.
+   - Records already migrated (hot key present) are skipped — the function is idempotent.
+3. If the invoice count is very large, `migrate()` may need to be called in batches
+   (the function processes all IDs in a single call; split by calling it multiple times
+   if the ledger CPU budget is exceeded — idempotency ensures safety).
+4. Verify: `get_invoice(id)` must return correct data for a sample of IDs.
+5. Verify: legacy `Invoice(id)` keys are absent (rent reclaimed).
+
+**Rollback:** Not supported post-migration. The v3 WASM reads only `InvoiceHot`/`InvoiceCold`
+keys. If a rollback to v2 WASM is required before `migrate()` is called, the legacy
+`Invoice(id)` keys are still present and the v2 WASM will read them correctly.
+Once `migrate()` has run and legacy keys are removed, a v2 WASM rollback is not safe.
+
+**Interface compatibility:** All public function signatures are unchanged. The split
+is entirely internal to storage layout. `interface-compat.yml` CI will report no
+breaking changes.
