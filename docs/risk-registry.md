@@ -65,6 +65,32 @@ remove_verifier(admin, verifier)
 Removes all three verifier storage entries (`Verifier`, `VerifierStake`,
 `VerifierReputation`) and returns the remaining (unslashed) stake to the verifier address.
 
+### Rotation lifecycle (Issue #739)
+
+```
+Active ──suspend_verifier──► Suspended ──reinstate_verifier──► Active
+  │                              │
+  └─request_verifier_removal──► PendingRemoval ──finalize_verifier_removal──► Removed
+         (Suspended may also request)      ▲ 7-day cooldown           │ 7-day re-add cooldown
+                                           │                          ▼
+                              cancel_verifier_removal               Active (re-added)
+```
+
+| Function | Transition | Effect |
+|---|---|---|
+| `suspend_verifier(admin, verifier)` | `Active` → `Suspended` | Blocks all new submissions (`register_sme`, `update_sme_score`, `set_credit_limit`, `set_debtor_score`, `top_up_stake`, sub-account delegation). Historical SME profiles and debtor attestations remain readable. Suspended weight **still counts** toward the `get_debtor_score` composite aggregate until formal removal. |
+| `reinstate_verifier(admin, verifier)` | `Suspended` → `Active` | Restores full submission rights. |
+| `request_verifier_removal(admin, verifier)` | `Active`/`Suspended` → `PendingRemoval` | Starts the 7-day removal cooldown (`VERIFIER_REMOVAL_COOLDOWN_SECS`). Submissions blocked; weight still counts pending finalization. |
+| `cancel_verifier_removal(admin, verifier)` | `PendingRemoval` → `Active` | Aborts a pending removal without touching stake or reputation. |
+| `finalize_verifier_removal(admin, verifier)` | `PendingRemoval` → `Removed` (after cooldown) | Returns remaining stake, clears the active flag, records `VerifierLastRemovedAt`. Per-verifier debtor attestation rows are **preserved** (never deleted) but excluded from the aggregate going forward — exclusion is prospective, not retroactive. |
+| `remove_verifier(admin, verifier)` | any → `Removed` (immediate) | Backward-compatible immediate-removal escape hatch. Records the same `Removed` marker and re-add cooldown timestamp as the two-step flow. Prefer the request/finalize flow for planned rotations. |
+
+Views: `get_verifier_status(verifier) → VerifierStatus`, `get_verifier_status_changed_at(verifier) → Option<u64>`, `get_verifier_removal_deadline(verifier) → Option<u64>` (earliest finalization timestamp).
+
+Re-addition anti-bypass: `add_verifier` rejects a `Removed` address until `VERIFIER_READD_COOLDOWN_SECS` (7 days) has elapsed (`ReadditionCooldownNotElapsed`), preventing immediate re-registration to launder slashing/reputation history. `Suspended`/`PendingRemoval` addresses cannot be re-added at all (`AlreadyInitialized`) — use reinstate/cancel/finalize instead.
+
+Errors: `VerifierSuspended` (submission while not `Active`), `RemovalCooldownNotElapsed`, `NoRemovalRequested`, `InvalidStatusTransition`, `ReadditionCooldownNotElapsed`.
+
 ---
 
 ## SME Registration & Scoring Lifecycle
@@ -204,6 +230,9 @@ activity volume for risk analysis.
 | `is_verifier(verifier)` | `true` if the address is a registered verifier |
 | `get_debtor_score(debtor_hash)` | Aggregated average debtor score across active verifiers, or `RiskRegistryError::DebtorNotRegistered` |
 | `get_debtor_score_attestation(verifier, debtor_hash)` | Specific verifier's score attestation, or `RiskRegistryError::DebtorNotRegistered` |
+| `get_verifier_status(verifier)` | `VerifierStatus` lifecycle state (`Active`/`Suspended`/`PendingRemoval`/`Removed`) |
+| `get_verifier_status_changed_at(verifier)` | Timestamp of last status transition, if any |
+| `get_verifier_removal_deadline(verifier)` | Earliest finalization timestamp for a pending removal, if any |
 | `get_admin()` | Current admin address |
 
 All read functions are authorization-free and safe to call from any context.
