@@ -12,7 +12,9 @@ export {
   TreasuryClient,
 } from "./clients";
 export { TESTNET, MAINNET } from "./base";
+export { TransactionOutcomeUnknownError } from "./transactionRecovery";
 export type { NetworkConfig } from "./base";
+export type { TransactionReconciliation } from "./transactionRecovery";
 export { createEventSubscription } from "./subscriptions";
 export type { EventSubscriptionOptions } from "./subscriptions";
 export type {
