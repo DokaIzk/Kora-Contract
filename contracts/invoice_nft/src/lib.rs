@@ -33,6 +33,9 @@ use kora_shared::{
     },
 };
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::IntoVal;
+
+pub const SCHEMA_VERSION: u32 = 2;
 
 /// Local error enum for `invoice_nft`. Soroban's `#[contracterror]` macro caps an
 /// error enum at 50 variants, so each contract owns its own small enum instead of
@@ -64,6 +67,17 @@ pub enum InvoiceNftError {
     SMENotRegistered = 21,
     Unauthorized = 22,
     UpgradeTimelockNotElapsed = 23,
+    MigrationVersionMismatch = 24,
+    InvalidMigrationTarget = 25,
+}
+
+impl From<kora_shared::migration::MigrationError> for InvoiceNftError {
+    fn from(error: kora_shared::migration::MigrationError) -> Self {
+        match error {
+            kora_shared::migration::MigrationError::VersionMismatch => Self::MigrationVersionMismatch,
+            _ => Self::InvalidMigrationTarget,
+        }
+    }
 }
 
 impl From<CommonError> for InvoiceNftError {
@@ -285,7 +299,7 @@ impl InvoiceNftContract {
         // historical version-1 upgrade steps.
         env.storage()
             .instance()
-            .set(&DataKey::MigrationVersion, &2u32);
+            .set(&DataKey::MigrationVersion, &SCHEMA_VERSION);
         Ok(())
     }
 
@@ -321,24 +335,35 @@ impl InvoiceNftContract {
     /// See docs/MIGRATIONS.md for the full runbook and a description of each
     /// version's changes.
     pub fn migrate(env: Env, admin: Address) -> Result<(), InvoiceNftError> {
+        let version_key = DataKey::MigrationVersion.into_val(&env);
+        let from = kora_shared::migration::read_version(&env, &version_key);
+        Self::migrate_versions(env, admin, from, SCHEMA_VERSION)
+    }
+
+    /// Explicit adjacent-step migration; `migrate` remains as a compatibility wrapper.
+    pub fn migrate_versions(
+        env: Env, admin: Address, from_version: u32, to_version: u32,
+    ) -> Result<(), InvoiceNftError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
-        Self::append_audit_entry(&env, &admin, AdminActionType::InvoiceNftMigrate);
-
-        let current_version: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MigrationVersion)
-            .unwrap_or(0);
-
-        // Version 0 -> 1: Initial setup (marks the baseline schema version).
-        if current_version < 1 {
-            env.storage()
-                .instance()
-                .set(&DataKey::MigrationVersion, &1u32);
+        let key = DataKey::MigrationVersion.into_val(&env);
+        let changed = kora_shared::migration::migrate(
+            &env, &key, from_version, to_version, SCHEMA_VERSION, |old, new| {
+                match (old, new) {
+                    (0, 1) => Ok(()),
+                    (1, 2) => Self::migrate_v1_to_v2(&env),
+                    _ => Err(InvoiceNftError::InvalidMigrationTarget),
+                }
+            },
+        )?;
+        if changed {
+            Self::append_audit_entry(&env, &admin, AdminActionType::InvoiceNftMigrate);
         }
+        Ok(())
+    }
 
-        // Version 1 -> 2: Invoice gained `notes: Option<String>`.
+    // Version 1 -> 2: Invoice gained `notes: Option<String>`.
+    fn migrate_v1_to_v2(env: &Env) -> Result<(), InvoiceNftError> {
         //
         // Old records in persistent storage are still encoded as InvoiceV1 (no
         // `notes` field).  Reading them as `Invoice` (v2) would panic because
@@ -346,7 +371,6 @@ impl InvoiceNftContract {
         //   1. Read each record as InvoiceV1 (the old encoding).
         //   2. Re-encode it as Invoice (v2) with notes = None.
         //   3. Overwrite the slot so future reads use the new codec.
-        if current_version < 2 {
             let next_id: u64 = env
                 .storage()
                 .instance()
@@ -379,18 +403,12 @@ impl InvoiceNftContract {
                         created_at: old.created_at,
                         funded_at: old.funded_at,
                         repaid_at: old.repaid_at,
-                        metadata_hash: Bytes::new(&env),
                         notes: None,
                     };
                     env.storage().persistent().set(&key, &upgraded);
                 }
                 id += 1;
             }
-
-            env.storage()
-                .instance()
-                .set(&DataKey::MigrationVersion, &2u32);
-        }
 
         Ok(())
     }
@@ -2092,6 +2110,22 @@ mod tests {
             env.storage().instance().get(&DataKey::MigrationVersion)
         });
         assert_eq!(version, Some(2));
+    }
+
+    #[test]
+    fn migration_walks_both_steps_and_recall_is_a_no_op() {
+        let (env, admin, client) = setup();
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&DataKey::MigrationVersion, &0u32);
+        });
+        client.migrate_versions(&admin, &0, &2);
+        let version: u32 = env.as_contract(&client.address, || {
+            env.storage().instance().get(&DataKey::MigrationVersion).unwrap()
+        });
+        assert_eq!(version, SCHEMA_VERSION);
+        client.migrate_versions(&admin, &0, &2);
+        assert_eq!(client.try_migrate_versions(&admin, &1, &2).unwrap_err().unwrap(),
+            InvoiceNftError::MigrationVersionMismatch);
     }
 
     #[test]

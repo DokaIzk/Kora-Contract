@@ -1,118 +1,38 @@
-# Contract Migrations & Timelocked Upgrades
+# Contract storage migrations
 
-This document describes the standardized, timelocked upgrade mechanism used across
-all Kora contracts. It is the reference for operators, auditors, and integrators
-who need to understand how WASM upgrades and storage migrations are proposed,
-reviewed, and executed.
+WASM upgrades and storage migrations are separate operations. Upgrading a contract does **not** migrate its state. After deploying new WASM, an administrator calls the contract's explicit migration entrypoint and verifies the stored version.
 
-## Motivation
+## Standard framework
 
-Instant, admin-triggered upgrades are a major trust concern for institutional
-investors (see `THREAT_MODEL.md`). A timelock gives the community and auditors a
-window to review and react to a proposed upgrade before it takes effect. Every
-upgrade is therefore:
+`contracts/shared/src/migration.rs` supplies:
 
-1. **Proposed** on-chain and publicly visible.
-2. **Delayed** by a configurable, admin-set interval.
-3. **Executable** only after the delay has elapsed.
-4. **Cancellable** by the admin before execution.
-
-On-chain governance voting over upgrades is intentionally out of scope here and
-is tracked separately under Governance.
-
-## The Shared `Timelock` Module
-
-The mechanism lives in `contracts/shared/src/timelock.rs` and is re-exported from
-`contracts/shared/src/lib.rs` so that every contract can adopt it from its upgrade
-entrypoint without duplicating logic.
-
-### Data Model
-
-```rust
-pub struct UpgradeProposal {
-    pub id: u64,
-    pub wasm_hash: BytesN<32>,
-    pub proposer: Address,
-    pub proposed_at: u64,
-    pub executed: bool,
-    pub cancelled: bool,
-}
-```
-
-Proposals are stored in persistent storage keyed by their monotonically
-increasing `id`. The configured delay is stored separately and is settable by the
-admin.
-
-### API
-
-| Function | Description |
+| Helper | Purpose |
 | --- | --- |
-| `propose_upgrade(env, admin, wasm_hash) -> u64` | Records the proposed WASM hash, proposer, and `proposed_at` timestamp. Returns the new proposal `id`. Emits an `upgrade_proposed` event. |
-| `execute_upgrade(env, admin, id)` | Executes a proposal only when `env.ledger().timestamp() >= proposed_at + delay`. Emits an `upgrade_executed` event. |
-| `cancel_upgrade(env, admin, id)` | Cancels a pending proposal before execution. Emits an `upgrade_cancelled` event. |
-| `set_upgrade_delay(env, admin, delay)` | Sets the configurable upgrade delay (admin only). |
-| `get_upgrade_delay(env) -> u64` | Returns the currently configured delay. |
-| `get_proposal(env, id) -> UpgradeProposal` | Returns a stored proposal for inspection. |
+| `read_version(env, key)` | Read the instance `SchemaVersion` key; missing means legacy version `0`. |
+| `read_current<T>(env, version_key, value_key, expected)` | Refuse to deserialize a value with the current codec while storage is at another version. Migration steps should read legacy values using legacy types. |
+| `migrate(env, key, from, to, SCHEMA_VERSION, step)` | Check the source and target, execute each adjacent step, and store the new version after each successful step. Returns `false` if already at target. |
 
-### Delay Semantics
+Each adopting contract declares a compile-time `SCHEMA_VERSION`, stores the version in **instance storage** on fresh initialization, and exposes an admin-authorized `migrate_versions(admin, from_version, to_version)` entrypoint. The entrypoint dispatches explicit `(old, new)` steps. Unknown steps fail. The shared helper rejects a mismatched stored source, a backwards target, zero, or a target newer than the installed WASM. Calls at the target are no-ops, even when the caller supplies an older `from_version`.
 
-- A sane default delay is applied on initialization.
-- The admin may adjust the delay via `set_upgrade_delay`.
-- `execute_upgrade` reverts with an early-execution error when
-  `env.ledger().timestamp() < proposed_at + delay`.
+The reference implementations are:
 
-### Edge Cases & Constraints
+| Contract | Current version | Steps |
+| --- | ---: | --- |
+| `invoice_nft` | 2 | `0→1` establishes the baseline; `1→2` backfills legacy invoices with `notes: None`. The existing `migrate(admin)` remains as a compatibility wrapper. |
+| `financing_pool` | 1 | `0→1` records the baseline without changing pool encodings. |
+| `marketplace` | 1 | `0→1` records the baseline without changing listing encodings. |
 
-- **Early execution is rejected.** Calling `execute_upgrade` before the delay has
-  elapsed fails.
-- **Replay is prevented.** A proposal that has already been executed cannot be
-  executed again; the `executed` flag is checked and set atomically.
-- **Cancellation is supported.** A pending proposal may be cancelled by the admin
-  and can no longer be executed.
-- **Unknown ids are rejected.** Executing or cancelling a non-existent proposal
-  fails.
+### Adding the next version
 
-## Adopting the Module in a Contract
+1. Keep the previous `#[contracttype]` definition when a stored value changes shape. Add `old→new` conversion code that reads it using the old type.
+2. Increment that contract's `SCHEMA_VERSION`, add an adjacent step, and make fresh `initialize` write the new version.
+3. Add tests for the individual step, a multi-step jump from the oldest supported version, a repeated call, invalid ranges, and a value read with the wrong codec. Check all relevant storage keys and TTL behavior.
+4. Upgrade the WASM through the contract's normal timelocked upgrade procedure. Separately call `migrate_versions(admin, stored_version, SCHEMA_VERSION)`. Verify the resulting version and inspect representative records before enabling new callers.
 
-Each contract's upgrade entrypoint should delegate to the shared module rather
-than performing an immediate upgrade:
+For example, a future v3 contract migrating v1 data runs `1→2` and then `2→3` in order. The shared helper updates the version only after each step succeeds. An error from a contract entrypoint reverts that invocation; the operator should investigate it before retrying. A migration that scans large collections may need a separate paginated design to fit Soroban resource limits; the invoice NFT v1→v2 step currently iterates allocated invoice IDs.
 
-```rust
-// propose
-let id = timelock::propose_upgrade(&env, admin.clone(), new_wasm_hash.clone());
+## Upgrade security and operations
 
-// later, after the delay has elapsed
-let proposal = timelock::get_proposal(&env, id);
-if env.ledger().timestamp() < proposal.proposed_at + timelock::get_upgrade_delay(&env) {
-    panic!("upgrade delay has not elapsed");
-}
-timelock::execute_upgrade(&env, admin.clone(), id);
-```
+Contract WASM changes still use their existing upgrade proposal, delay, execution, and cancellation controls. A migration call requires the adopting contract's administrator and is **never** invoked automatically by the WASM upgrade. Check the new WASM hash and storage version independently. Do not assume all contracts share the same numeric schema version.
 
-## Events
-
-Both proposal and execution emit events so that off-chain monitors and the
-community can observe the full lifecycle:
-
-- `upgrade_proposed` — emitted when a proposal is created.
-- `upgrade_executed` — emitted when a proposal is executed.
-- `upgrade_cancelled` — emitted when a proposal is cancelled.
-
-## Testing Requirements
-
-Adopting contracts must maintain a minimum of 90% coverage over the timelock
-paths. At a minimum, tests must cover:
-
-- **Early-execution rejection** — executing before the delay elapses fails.
-- **Cancellation** — a cancelled proposal cannot be executed.
-- **Successful post-delay execution** — a proposal executes once the delay has
-  elapsed.
-- **Replay prevention** — an executed proposal cannot be executed again.
-
-## Operational Checklist
-
-1. Propose the upgrade and record the returned `id`.
-2. Announce the proposal and the intended execution time to the community.
-3. Wait for the configured delay to elapse.
-4. Execute the upgrade (or cancel it if concerns are raised).
-5. Verify the emitted `upgrade_executed` event and the new WASM hash.
+The shared migration module does not replace `contracts/shared/src/timelock.rs` or an existing contract's authorization and governance rules. Operators should record the deployed WASM hash, old and target versions, migration transaction, and post-migration read checks for each contract.

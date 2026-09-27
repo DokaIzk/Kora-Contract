@@ -8,7 +8,9 @@ use kora_shared::{
     types::{Listing, RiskTier},
     validation::{bps_of_normalized, require_non_zero_amount, require_valid_fee_bps, require_within_max_amount, safe_add, safe_sub, UPGRADE_TIMELOCK_DELAY},
 };
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, IntoVal, Vec};
+
+pub const SCHEMA_VERSION: u32 = 1;
 
 // ~30 days in ledgers at ~5 s/ledger
 const PERSISTENT_TTL_THRESHOLD: u32 = 518_400;
@@ -68,6 +70,8 @@ pub enum DataKey {
     FeeContribution(u64, Address),
     /// Oracle currency symbol registered for a whitelisted token (#449).
     TokenCurrency(Address),
+    /// Instance schema version; absent on deployments predating this framework.
+    SchemaVersion,
 }
 
 // ── Config struct ─────────────────────────────────────────────────────────────
@@ -115,6 +119,25 @@ pub struct MarketplaceContract;
 
 #[contractimpl]
 impl MarketplaceContract {
+    /// Explicit admin migration. Legacy listings retain their existing codec.
+    pub fn migrate_versions(
+        env: Env, admin: Address, from_version: u32, to_version: u32,
+    ) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        let key = DataKey::SchemaVersion.into_val(&env);
+        kora_shared::migration::migrate(&env, &key, from_version, to_version, SCHEMA_VERSION,
+            |old, new| match (old, new) {
+                (0, 1) => Ok(()), // No listing codec change in the baseline migration.
+                _ => Err(KoraError::InvalidParameterValue),
+            })?;
+        Ok(())
+    }
+
+    pub fn schema_version(env: Env) -> u32 {
+        kora_shared::migration::read_version(&env, &DataKey::SchemaVersion.into_val(&env))
+    }
+
     /// Initialize the marketplace. One-time call.
     pub fn initialize(
         env: Env,
@@ -152,6 +175,7 @@ impl MarketplaceContract {
             referrer_split_bps: 0,
         };
         env.storage().instance().set(&DataKey::Config, &config);
+        env.storage().instance().set(&DataKey::SchemaVersion, &SCHEMA_VERSION);
         Ok(())
     }
 
@@ -2024,6 +2048,28 @@ mod tests {
         testutils::{Address as _, Ledger, LedgerInfo},
         Address, Env,
     };
+
+    #[test]
+    fn schema_migration_recall_and_wrong_target() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, MarketplaceContract);
+        let client = MarketplaceContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let nft = Address::generate(&env);
+        let pool = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let access = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let registry = Address::generate(&env);
+        client.initialize(&admin, &nft, &pool, &treasury, &access, &oracle, &registry, &50, &0);
+        assert_eq!(client.schema_version(), SCHEMA_VERSION);
+        env.as_contract(&id, || env.storage().instance().remove(&DataKey::SchemaVersion));
+        client.migrate_versions(&admin, &0, &1);
+        client.migrate_versions(&admin, &0, &1);
+        assert_eq!(client.schema_version(), 1);
+        assert!(client.try_migrate_versions(&admin, &0, &2).is_err());
+    }
 
     // ── Test harness ──────────────────────────────────────────────────────────
 
