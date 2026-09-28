@@ -16,6 +16,16 @@ pub const SCHEMA_VERSION: u32 = 1;
 
 const MAX_AMOUNT: i128 = i128::MAX / 2;
 
+/// Maximum number of invoices that can be net-settled in a single transaction.
+/// Enforced to prevent DoS via unbounded iteration (6 nested loops over invoice_ids).
+/// Resource cost at bound: 10 invoices × ~20,000 instructions = ~200,000 instructions (safe).
+pub const MAX_NETTING_INVOICES: u32 = 10;
+
+/// Maximum number of distinct investors (positions) per pool.
+/// Enforced to prevent DoS in distribute_yield iteration.
+/// Resource cost at bound: 100 investors × ~5,000 instructions = ~500,000 instructions (acceptable).
+pub const MAX_POSITIONS_PER_POOL: u32 = 100;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -58,17 +68,9 @@ pub enum FinancingPoolError {
     DisputeNotOpen = 31,
     // Partial repayment (#566)
     PartialRepayInvalid = 32,
-    MigrationVersionMismatch = 33,
-    InvalidMigrationTarget = 34,
-}
-
-impl From<kora_shared::migration::MigrationError> for FinancingPoolError {
-    fn from(error: kora_shared::migration::MigrationError) -> Self {
-        match error {
-            kora_shared::migration::MigrationError::VersionMismatch => Self::MigrationVersionMismatch,
-            _ => Self::InvalidMigrationTarget,
-        }
-    }
+    // Loop bound enforcement (DoS protection)
+    BatchSizeExceeded = 33,
+    TooManyInvestors = 34,
 }
 
 impl From<CommonError> for FinancingPoolError {
@@ -517,6 +519,12 @@ impl FinancingPoolContract {
             .get(investor.clone())
             .map(|p: Position| p.contributed)
             .unwrap_or(0);
+
+        // Enforce maximum distinct investors per pool to prevent DoS in distribute_yield.
+        // Only check when adding a NEW investor (not updating existing position).
+        if old_contributed == 0 && positions.len() >= MAX_POSITIONS_PER_POOL {
+            return Err(FinancingPoolError::TooManyInvestors);
+        }
 
         positions.set(investor.clone(), position);
         env.storage()
@@ -1224,6 +1232,10 @@ impl FinancingPoolContract {
         // Require at least 2 invoices; single-invoice callers should use repay().
         if invoice_ids.len() < 2 {
             return Err(FinancingPoolError::InvalidAmount);
+        }
+        // Enforce maximum netting batch size to prevent DoS via unbounded iteration (6 nested loops).
+        if invoice_ids.len() > MAX_NETTING_INVOICES {
+            return Err(FinancingPoolError::BatchSizeExceeded);
         }
 
         let nft_contract: Address = env

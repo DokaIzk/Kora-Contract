@@ -98,6 +98,11 @@ pub const VERIFIER_READD_COOLDOWN_SECS: u64 = 7 * 24 * 3_600; // 7 days
 /// Prevents rapid manipulation immediately before a funding or default decision.
 pub const MIN_SCORE_UPDATE_INTERVAL: u64 = 3_600; // 1 hour
 
+/// Maximum number of distinct verifiers that can attest to a single debtor.
+/// Enforced to prevent DoS via unbounded iteration in get_debtor_score aggregation.
+/// Resource cost at bound: 50 verifiers × ~3,000 instructions = ~150,000 instructions (safe).
+pub const MAX_VERIFIERS_PER_DEBTOR: u32 = 50;
+
 // ── Storage Keys ─────────────────────────────────────────────────────────────
 
 #[contracttype]
@@ -1298,6 +1303,10 @@ impl RiskRegistryContract {
             .unwrap_or_else(|| Vec::new(&env));
 
         if !attestors.contains(&verifier) {
+            // Enforce maximum verifiers per debtor to prevent DoS in get_debtor_score aggregation
+            if attestors.len() >= MAX_VERIFIERS_PER_DEBTOR {
+                return Err(RiskRegistryError::InvalidLength); // Reuse existing error variant
+            }
             attestors.push_back(verifier.clone());
             env.storage().persistent().set(&attestors_key, &attestors);
         }

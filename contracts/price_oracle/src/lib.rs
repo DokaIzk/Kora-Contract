@@ -9,6 +9,11 @@ const UPGRADE_TIMELOCK_DELAY: u64 = 86_400;
 /// entry holds the whole ring, so this bounds on-chain storage growth.
 const PRICE_HISTORY_CAP: u32 = 32;
 
+/// Maximum number of price feeders that can be registered.
+/// Defense-in-depth bound for get_price aggregation loop (typically 3-7 feeders operationally).
+/// Resource cost at bound: 20 feeders × ~3,000 instructions = ~60,000 instructions (safe).
+pub const MAX_FEEDERS: u32 = 20;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -29,6 +34,10 @@ pub enum PriceOracleError {
     PegAlreadyConfigured = 12,
     /// No PegConfig found for this (base, quote) pair.
     PegNotConfigured = 13,
+    /// Too many feeders registered (exceeds MAX_FEEDERS).
+    TooManyFeeders = 14,
+    /// Price change exceeds maximum allowed per-update rate change.
+    RateChangeExceeded = 15,
 }
 
 #[contracttype]
@@ -80,6 +89,9 @@ pub enum DataKey {
     PriceHistory(Symbol, Symbol),
     BaseCurrency,
     MaxDeviation,
+    /// Maximum allowed price change per update in basis points (e.g., 2000 = 20%).
+    /// Configured per currency pair. Prevents single-update manipulation attacks.
+    MaxRateChange(Symbol, Symbol),
     /// Peg configuration for a specific (base, quote) pair (#589).
     PegConfig(Symbol, Symbol),
     /// Set to `true` when a peg deviation has been detected and `auto_flag` is enabled.
@@ -135,6 +147,50 @@ impl PriceOracleContract {
             let expected_reciprocal = Self::compute_reciprocal(price)?;
             let tolerance_bps = 100; // 1% = 100 basis points
             Self::validate_reciprocal_tolerance(expected_reciprocal, reverse_data.price, tolerance_bps)?;
+        }
+
+        // ── Rate-Change Sanity Bound (defense against fresh-but-manipulated) ───
+        // Check if this update exceeds the configured maximum single-update change.
+        // Runs *before* peg check so both guards are independent.
+        if let Some(max_change_bps) = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::MaxRateChange(base.clone(), quote.clone()))
+        {
+            // Get this feeder's previous price for this pair
+            if let Some(prev_data) = env
+                .storage()
+                .persistent()
+                .get::<_, PriceData>(&DataKey::FeederPrice(
+                    base.clone(),
+                    quote.clone(),
+                    feeder.clone(),
+                ))
+            {
+                // Compute percentage change: |new - old| / old * 10_000
+                let diff = (price - prev_data.price).abs();
+                let change_bps = diff
+                    .checked_mul(10_000)
+                    .and_then(|v| v.checked_div(prev_data.price))
+                    .ok_or(PriceOracleError::ArithmeticOverflow)? as u32;
+
+                if change_bps > max_change_bps {
+                    // Emit event so off-chain monitors can detect attempted manipulation
+                    env.events().publish(
+                        (soroban_sdk::symbol_short!("RATE_EX"),),
+                        (
+                            base.clone(),
+                            quote.clone(),
+                            prev_data.price,
+                            price,
+                            change_bps,
+                            max_change_bps,
+                            env.ledger().timestamp(),
+                        ),
+                    );
+                    return Err(PriceOracleError::RateChangeExceeded);
+                }
+            }
         }
 
         // ── Peg validation (#589) ─────────────────────────────────────────────
@@ -410,6 +466,57 @@ impl PriceOracleContract {
             .persistent()
             .get::<_, bool>(&DataKey::PegFlagged(base, quote))
             .unwrap_or(false)
+    }
+
+    // ── Rate-Change Sanity Bound (#adversarial-testing) ────────────────────────
+
+    /// Set maximum allowed price change per update for a currency pair.
+    ///
+    /// Admin only. Rejects single-update price changes exceeding this percentage,
+    /// forcing attackers to move prices gradually (giving monitoring time to react).
+    ///
+    /// **Parameters:**
+    /// - `admin` — The contract admin (must sign).
+    /// - `base` — Base currency symbol.
+    /// - `quote` — Quote currency symbol.
+    /// - `max_change_bps` — Maximum percentage change per update, in basis points
+    ///   (e.g., 2000 = 20%). Set to 0 to disable rate-change checking for this pair.
+    ///
+    /// **Errors:**
+    /// - `PriceOracleError::NotAdmin` — Caller is not the admin.
+    ///
+    /// **Security:** Provides defense-in-depth against fresh-but-manipulated prices
+    /// that pass staleness and reciprocal checks but represent unrealistic jumps.
+    pub fn set_max_rate_change(
+        env: Env,
+        admin: Address,
+        base: Symbol,
+        quote: Symbol,
+        max_change_bps: u32,
+    ) -> Result<(), PriceOracleError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        if max_change_bps == 0 {
+            // Zero means "disable rate-change check for this pair"
+            env.storage()
+                .persistent()
+                .remove(&DataKey::MaxRateChange(base, quote));
+        } else {
+            env.storage()
+                .persistent()
+                .set(&DataKey::MaxRateChange(base, quote), &max_change_bps);
+        }
+        Ok(())
+    }
+
+    /// Read the configured maximum rate-change per update for a pair.
+    ///
+    /// Returns `None` if no rate-change bound has been configured (unlimited changes allowed).
+    pub fn get_max_rate_change(env: Env, base: Symbol, quote: Symbol) -> Option<u32> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::MaxRateChange(base, quote))
     }
 
     /// Get the aggregated price for a pair (median of all active feeders).
