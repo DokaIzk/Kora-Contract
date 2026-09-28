@@ -2,6 +2,7 @@ const assert = require('assert');
 const { fxService } = require('../dist/services/fxService');
 const { NotificationService, notificationService } = require('../dist/services/notificationService');
 const { SimulationService, simulationService } = require('../dist/services/simulationService');
+const { DiversificationService, diversificationService } = require('../dist/services/diversificationService');
 
 console.log('=== Running @kora/web Test Suite ===\n');
 
@@ -83,5 +84,29 @@ console.log('\nRunning Transaction Simulation Tests (#785)...');
   assert.strictEqual(failResult.errorReason, 'Insufficient balance', 'Error reason should match');
 
   console.log('✓ Transaction Simulation Tests passed.');
+
+  // 5. Investor Diversification Insights Test Suite (#791)
+  console.log('\nRunning Investor Diversification Insights Tests (#791)...');
+  const divService = new DiversificationService();
+  const emptyDiv = divService.calculateDiversification([]);
+  assert.strictEqual(emptyDiv.totalPortfolioUsd, 0, 'Empty portfolio should have 0 total');
+
+  const positions = [
+    { debtor: 'Acme Ltd', amountUsd: 2500, riskScore: 30, tenorDays: 30 },
+    { debtor: 'Acme Ltd', amountUsd: 1000, riskScore: 30, tenorDays: 30 },
+    { debtor: 'Beta Corp', amountUsd: 6500, riskScore: 80, tenorDays: 60 },
+  ];
+  const divData = divService.calculateDiversification(positions);
+  assert.strictEqual(divData.totalPortfolioUsd, 10000, 'Total portfolio should be 10000');
+  const betaItem = divData.debtorExposures.find((d) => d.name === 'Beta Corp');
+  assert.strictEqual(betaItem.status, 'BREACHED', 'Beta Corp (65%) should be BREACHED');
+
+  const check = divService.checkProspectiveContribution(
+    [{ debtor: 'Debtor A', amountUsd: 2000, riskScore: 50, tenorDays: 30 }],
+    { debtor: 'Debtor A', amountUsd: 5000, riskScore: 50, tenorDays: 30 }
+  );
+  assert.strictEqual(check.willBreach, true, 'Prospective contribution should be flagged as breaching cap');
+  console.log('✓ Investor Diversification Insights Tests passed.');
+
   console.log('\n=== All @kora/web Tests Completed Successfully! (100% Coverage) ===');
 })();

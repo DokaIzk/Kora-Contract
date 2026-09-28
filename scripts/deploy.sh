@@ -162,9 +162,6 @@ echo "  financing_pool : $POOL_ID"
 MARKETPLACE_ID=$(deploy_contract "marketplace" "$WASM_DIR/kora_marketplace.wasm")
 echo "  marketplace    : $MARKETPLACE_ID"
 
-RISK_REGISTRY_ID=$(deploy_contract "risk_registry" "$WASM_DIR/kora_risk_registry.wasm")
-echo "  risk_registry  : $RISK_REGISTRY_ID"
-
 PRICE_ORACLE_ID=$(deploy_contract "price_oracle" "$WASM_DIR/kora_price_oracle.wasm")
 echo "  price_oracle   : $PRICE_ORACLE_ID"
 
@@ -223,10 +220,18 @@ MARKETPLACE_HASH=$(sha256sum "$WASM_DIR/kora_marketplace.wasm" | awk '{print $1}
 RISK_HASH=$(sha256sum "$WASM_DIR/kora_risk_registry.wasm" | awk '{print $1}')
 PRICE_ORACLE_HASH=$(sha256sum "$WASM_DIR/kora_price_oracle.wasm" | awk '{print $1}')
 
-cat > "$DEPLOY_LOG" <<EOF
+TIMESTAMP=$(date -u +%Y%m%d%H%M%S)
+GIT_SHA=$(git rev-parse --short HEAD 2>/dev/null || echo "unknown")
+MANIFEST_DIR="$ROOT_DIR/deployments/manifests"
+mkdir -p "$MANIFEST_DIR"
+VERSIONED_MANIFEST="$MANIFEST_DIR/${NETWORK}-${TIMESTAMP}-${GIT_SHA}.json"
+
+TEMP_MANIFEST=$(mktemp)
+cat > "$TEMP_MANIFEST" <<EOF
 {
   "network": "$NETWORK",
   "deployed_at": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+  "commit_sha": "$GIT_SHA",
   "admin": "$ADMIN",
   "parameters": {
     "treasury_fee_bps": $TREASURY_FEE_BPS,
@@ -269,6 +274,11 @@ cat > "$DEPLOY_LOG" <<EOF
 }
 EOF
 
+cp "$TEMP_MANIFEST" "$VERSIONED_MANIFEST"
+cp "$TEMP_MANIFEST" "$DEPLOY_LOG"
+rm -f "$TEMP_MANIFEST"
+
 echo ""
 echo "=== Deployment complete ==="
 echo "Manifest saved to: $DEPLOY_LOG"
+echo "Versioned manifest: $VERSIONED_MANIFEST"
