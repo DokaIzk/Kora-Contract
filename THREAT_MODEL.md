@@ -2,6 +2,8 @@
 
 This document outlines the key threat actors, their capabilities, and the protocol's defenses against each. It covers all seven contracts: `invoice_nft`, `marketplace`, `financing_pool`, `treasury`, `risk_registry`, `access_control`, and the `shared` library.
 
+Security use pashov skills.
+
 ---
 
 ## Threat Actors

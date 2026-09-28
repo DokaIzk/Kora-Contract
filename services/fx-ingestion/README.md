@@ -47,6 +47,14 @@ NGN, KES, GHS, ZAR, TZS, UGX, XOF, EGP (configurable via `FX_CURRENCIES`)
 | `CURRENCY_API_KEY` | _(required)_ | currencyapi.com API key |
 | `FX_MAX_STALENESS_SECONDS` | `3600` | Max rate age before staleness rejection |
 
+In deployed environments, inject `FX_RELAY_SECRET`, provider API keys, and any
+RPC credentials from the environment-specific `/kora/<environment>/fx-ingestion`
+AWS Secrets Manager secret using a service-only read role. Keep public contract
+addresses and non-secret settings in normal deployment configuration. Local
+development should use disposable testnet credentials from a mode-`0600` file
+under `$HOME/.config/kora/`; never use production credentials locally. See
+[the secrets runbook](../../infra/secrets/README.md).
+
 ---
 
 ## Running
@@ -54,8 +62,12 @@ NGN, KES, GHS, ZAR, TZS, UGX, XOF, EGP (configurable via `FX_CURRENCIES`)
 ```bash
 npm install
 npm run build
-FX_RELAY_SECRET=S... ORACLE_CONTRACT_ADDRESS=C... npm start
+npm start
 ```
+
+Start the service only after its environment has been populated through the
+local testnet secret file or the deployment secret manager. Do not put secret
+values in command history.
 
 ## Testing
 

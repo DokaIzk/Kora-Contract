@@ -1,0 +1,41 @@
+rule_files:
+  - ../alerts.yml
+
+evaluation_interval: 1m
+
+tests:
+  - name: circuit breaker trips page on-call after debounce
+    interval: 1m
+    input_series:
+      - series: 'kora_onchain_events_total{event_type="circuit_breaker_trip", job="kora-indexer"}'
+        values: "0 1 1 1"
+    alert_rule_test:
+      - eval_time: 3m
+        alertname: KoraCircuitBreakerTripped
+        exp_alerts:
+          - exp_labels:
+              severity: critical
+              tier: sev-1
+              event_type: circuit_breaker_trip
+              job: kora-indexer
+            exp_annotations:
+              summary: Kora circuit breaker tripped
+              description: A circuit-breaker trip was observed in the last five minutes. Follow the Sev-1 incident runbook.
+
+  - name: default events are warning-only
+    interval: 1m
+    input_series:
+      - series: 'kora_onchain_events_total{event_type="default", job="kora-indexer"}'
+        values: "0 1 1 1"
+    alert_rule_test:
+      - eval_time: 4m
+        alertname: KoraInvoiceDefaultObserved
+        exp_alerts:
+          - exp_labels:
+              severity: warning
+              tier: sev-2
+              event_type: default
+              job: kora-indexer
+            exp_annotations:
+              summary: Kora invoice default event observed
+              description: A default event was observed. Defaults can be expected protocol events; investigate context before escalation.
