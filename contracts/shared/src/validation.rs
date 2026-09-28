@@ -48,8 +48,6 @@ pub fn require_non_negative_amount(amount: i128) -> Result<(), CommonError> {
 /// assert!(require_amount_within_bounds(101, 100).is_err());
 /// assert!(require_amount_within_bounds(-1, 100).is_err());
 /// ```
-/// Reject amounts outside [0, max].
-#[inline]
 pub fn require_amount_within_bounds(amount: i128, max: i128) -> Result<(), CommonError> {
     if amount < 0 || amount > max {
         return Err(CommonError::InvalidAmount);

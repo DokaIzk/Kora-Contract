@@ -170,4 +170,6 @@ pub enum CommonError {
     ArithmeticUnderflow = 11,
     /// Reentrancy guard triggered.
     Reentrancy = 12,
+    InvalidLength = 13,
+    BatchSizeExceeded = 14,
 }
