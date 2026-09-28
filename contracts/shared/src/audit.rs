@@ -97,6 +97,10 @@ pub enum AdminActionType {
     // ── RiskRegistry ─────────────────────────────────────────────────────────
     AddVerifier,
     RemoveVerifier,
+    SuspendVerifier,
+    ReinstateVerifier,
+    RequestVerifierRemoval,
+    FinalizeVerifierRemoval,
     RecordDefault,
     RegistryTransferAdmin,
     RegistryProposeUpgrade,
