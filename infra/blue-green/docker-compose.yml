@@ -1,0 +1,122 @@
+# =============================================================================
+# Kora Protocol — Blue-Green Docker Compose
+#
+# Each service runs as two named instances (blue / green).
+# Only one is active (receiving traffic via nginx) at any time.
+# The deploy.sh script manages starting/stopping and nginx reconfiguration.
+#
+# Ports:
+#   api-blue:      3001
+#   api-green:     3002
+#   indexer-blue:  8081
+#   indexer-green: 8082
+#   nginx (public): 80 / 443
+# =============================================================================
+
+version: "3.9"
+
+x-api-base: &api-base
+  image: "${SERVICE_IMAGE:-ghcr.io/openledger-foundation/kora-api:latest}"
+  restart: "no"      # deploy.sh manages lifecycle explicitly
+  environment:
+    NODE_ENV: production
+    DATABASE_URL: "${DATABASE_URL}"
+    STELLAR_RPC_URL: "${STELLAR_RPC_URL}"
+    STELLAR_NETWORK_PASSPHRASE: "${STELLAR_NETWORK_PASSPHRASE}"
+    FEATURE_FLAGS_DB: "/data/flags.db"
+    # Kill-switch: propagate to existing SSE clients on reconnect
+    SSE_RECONNECT_HINT_MS: "3000"
+  volumes:
+    - api-data:/data
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:3000/health"]
+    interval: 5s
+    timeout: 5s
+    retries: 3
+    start_period: 10s
+
+x-indexer-base: &indexer-base
+  image: "${SERVICE_IMAGE:-ghcr.io/openledger-foundation/kora-indexer:latest}"
+  restart: "no"
+  environment:
+    NODE_ENV: production
+    DATABASE_URL: "${DATABASE_URL}"
+    STELLAR_RPC_URL: "${STELLAR_RPC_URL}"
+    STELLAR_NETWORK_PASSPHRASE: "${STELLAR_NETWORK_PASSPHRASE}"
+    # Cursor handoff: new indexer starts from where outgoing left off.
+    # Set by deploy.sh from the outgoing instance's /internal/cursor endpoint.
+    # If empty, indexer starts from the latest ledger (safe default for green deploys).
+    INDEXER_START_CURSOR: "${INDEXER_START_CURSOR:-}"
+  healthcheck:
+    test: ["CMD", "curl", "-f", "http://localhost:8080/health"]
+    interval: 5s
+    timeout: 5s
+    retries: 3
+    start_period: 15s
+
+services:
+  # ── API Gateway ─────────────────────────────────────────────────────────────
+
+  api-blue:
+    <<: *api-base
+    container_name: kora-api-blue
+    ports:
+      - "3001:3000"
+    labels:
+      kora.colour: "blue"
+      kora.service: "api"
+
+  api-green:
+    <<: *api-base
+    container_name: kora-api-green
+    ports:
+      - "3002:3000"
+    labels:
+      kora.colour: "green"
+      kora.service: "api"
+
+  # ── Indexer ──────────────────────────────────────────────────────────────────
+
+  indexer-blue:
+    <<: *indexer-base
+    container_name: kora-indexer-blue
+    ports:
+      - "8081:8080"
+    labels:
+      kora.colour: "blue"
+      kora.service: "indexer"
+
+  indexer-green:
+    <<: *indexer-base
+    container_name: kora-indexer-green
+    ports:
+      - "8082:8080"
+    labels:
+      kora.colour: "green"
+      kora.service: "indexer"
+
+  # ── Nginx (traffic router) ───────────────────────────────────────────────────
+
+  nginx:
+    image: "nginx:1.25-alpine"
+    container_name: kora-nginx
+    restart: always
+    ports:
+      - "80:80"
+      - "443:443"
+    volumes:
+      - ./nginx/nginx.conf:/etc/nginx/nginx.conf:ro
+      - ./nginx/upstream-api.conf:/etc/nginx/conf.d/upstream-api.conf
+      - ./nginx/upstream-indexer.conf:/etc/nginx/conf.d/upstream-indexer.conf
+      - ./nginx/ssl:/etc/nginx/ssl:ro
+    depends_on:
+      - api-blue
+    healthcheck:
+      test: ["CMD", "nginx", "-t"]
+      interval: 30s
+      timeout: 10s
+      retries: 3
+
+volumes:
+  api-data:
+    driver: local
