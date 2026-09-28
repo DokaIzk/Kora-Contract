@@ -39,3 +39,64 @@ lto = true
 [profile.release-with-logs]
 inherits = "release"
 debug-assertions = true
+
+# ── Security-Relevant Clippy Lints (Security Hardening Wave) ──────────────────
+#
+# Curated list of security-relevant lints set to deny. These prevent entire
+# classes of production panics, arithmetic bugs, and subtle vulnerabilities.
+#
+# Lint categories:
+# - Arithmetic safety: overflow, wrapping, unchecked operations
+# - Panic safety: unwrap/expect in production paths, indexing panics
+# - Memory safety: unsafe operations without clear justification
+# - Logic errors: lossy conversions, unreachable code, unused results
+#
+# Suppressions: Individual #[allow(...)] with inline justification only when
+# genuinely not applicable. Never blanket-disable at crate level.
+
+[workspace.lints.clippy]
+# ── Arithmetic Safety ─────────────────────────────────────────────────────────
+# Prevent unchecked arithmetic that could overflow/wrap in production
+arithmetic_side_effects = "deny"
+integer_arithmetic = "deny"
+# Cast from larger to smaller int type without explicit bounds check
+cast_possible_truncation = "deny"
+cast_possible_wrap = "deny"
+cast_precision_loss = "warn"
+# Lossy float-to-int conversion
+cast_lossless = "warn"
+
+# ── Panic Safety ──────────────────────────────────────────────────────────────
+# Prevent panicking operations in production code paths
+unwrap_used = "deny"
+expect_used = "deny"
+indexing_slicing = "deny"
+panic = "deny"
+todo = "deny"
+unimplemented = "deny"
+unreachable = "deny"
+# .unwrap_or_else() or similar could panic if closure panics
+unwrap_in_result = "deny"
+
+# ── Memory & Unsafe Safety ────────────────────────────────────────────────────
+# Require explicit justification for unsafe code
+undocumented_unsafe_blocks = "deny"
+multiple_unsafe_ops_per_block = "deny"
+
+# ── Logic & Correctness ───────────────────────────────────────────────────────
+# Prevent silent loss of information or ignored errors
+must_use_candidate = "warn"
+unused_results = "deny"
+# Comparison operators that could be misunderstood
+float_cmp = "warn"
+# Possible off-by-one in slice ranges
+range_plus_one = "warn"
+range_minus_one = "warn"
+
+# ── Code Quality (Security-Relevant) ──────────────────────────────────────────
+# Overly complex functions are harder to audit for correctness
+cognitive_complexity = "warn"
+# Missing error propagation
+missing_errors_doc = "warn"
+# Public API safety
+missing_safety_doc = "deny"
