@@ -705,6 +705,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "kora-dispute-escrow"
+version = "0.1.0"
+dependencies = [
+ "soroban-sdk",
+]
+
+[[package]]
 name = "kora-financing-pool"
 version = "0.1.0"
 dependencies = [
