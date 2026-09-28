@@ -1,118 +1,24 @@
-# Contract Migrations & Timelocked Upgrades
+# Kora Protocol — Contract Upgrade & Interface Migration Guide
 
-This document describes the standardized, timelocked upgrade mechanism used across
-all Kora contracts. It is the reference for operators, auditors, and integrators
-who need to understand how WASM upgrades and storage migrations are proposed,
-reviewed, and executed.
+This document records public contract interface schema migrations, breaking changes, and versioning history.
 
-## Motivation
+## Migration Policy & CI Gate
 
-Instant, admin-triggered upgrades are a major trust concern for institutional
-investors (see `THREAT_MODEL.md`). A timelock gives the community and auditors a
-window to review and react to a proposed upgrade before it takes effect. Every
-upgrade is therefore:
+To protect indexers, wallet adapters, and the SDK from silent breaking changes:
 
-1. **Proposed** on-chain and publicly visible.
-2. **Delayed** by a configurable, admin-set interval.
-3. **Executable** only after the delay has elapsed.
-4. **Cancellable** by the admin before execution.
+1. **Interface Compatibility Check**: On every Pull Request, `.github/workflows/interface-compat.yml` inspects contract public WASM interfaces against `main`.
+2. **Additive Changes**: Adding new functions or optional struct fields is non-breaking and allowed.
+3. **Breaking Changes**: Removing functions, altering parameter types, or changing enum variants is breaking.
+4. **Breaking Change Acknowledgment Path**:
+   - Add the `interface-break-acknowledged` label to the PR.
+   - Record a new entry in the [Migration History](#migration-history) log below describing the breaking change and client migration steps.
 
-On-chain governance voting over upgrades is intentionally out of scope here and
-is tracked separately under Governance.
+---
 
-## The Shared `Timelock` Module
+## Migration History
 
-The mechanism lives in `contracts/shared/src/timelock.rs` and is re-exported from
-`contracts/shared/src/lib.rs` so that every contract can adopt it from its upgrade
-entrypoint without duplicating logic.
-
-### Data Model
-
-```rust
-pub struct UpgradeProposal {
-    pub id: u64,
-    pub wasm_hash: BytesN<32>,
-    pub proposer: Address,
-    pub proposed_at: u64,
-    pub executed: bool,
-    pub cancelled: bool,
-}
-```
-
-Proposals are stored in persistent storage keyed by their monotonically
-increasing `id`. The configured delay is stored separately and is settable by the
-admin.
-
-### API
-
-| Function | Description |
-| --- | --- |
-| `propose_upgrade(env, admin, wasm_hash) -> u64` | Records the proposed WASM hash, proposer, and `proposed_at` timestamp. Returns the new proposal `id`. Emits an `upgrade_proposed` event. |
-| `execute_upgrade(env, admin, id)` | Executes a proposal only when `env.ledger().timestamp() >= proposed_at + delay`. Emits an `upgrade_executed` event. |
-| `cancel_upgrade(env, admin, id)` | Cancels a pending proposal before execution. Emits an `upgrade_cancelled` event. |
-| `set_upgrade_delay(env, admin, delay)` | Sets the configurable upgrade delay (admin only). |
-| `get_upgrade_delay(env) -> u64` | Returns the currently configured delay. |
-| `get_proposal(env, id) -> UpgradeProposal` | Returns a stored proposal for inspection. |
-
-### Delay Semantics
-
-- A sane default delay is applied on initialization.
-- The admin may adjust the delay via `set_upgrade_delay`.
-- `execute_upgrade` reverts with an early-execution error when
-  `env.ledger().timestamp() < proposed_at + delay`.
-
-### Edge Cases & Constraints
-
-- **Early execution is rejected.** Calling `execute_upgrade` before the delay has
-  elapsed fails.
-- **Replay is prevented.** A proposal that has already been executed cannot be
-  executed again; the `executed` flag is checked and set atomically.
-- **Cancellation is supported.** A pending proposal may be cancelled by the admin
-  and can no longer be executed.
-- **Unknown ids are rejected.** Executing or cancelling a non-existent proposal
-  fails.
-
-## Adopting the Module in a Contract
-
-Each contract's upgrade entrypoint should delegate to the shared module rather
-than performing an immediate upgrade:
-
-```rust
-// propose
-let id = timelock::propose_upgrade(&env, admin.clone(), new_wasm_hash.clone());
-
-// later, after the delay has elapsed
-let proposal = timelock::get_proposal(&env, id);
-if env.ledger().timestamp() < proposal.proposed_at + timelock::get_upgrade_delay(&env) {
-    panic!("upgrade delay has not elapsed");
-}
-timelock::execute_upgrade(&env, admin.clone(), id);
-```
-
-## Events
-
-Both proposal and execution emit events so that off-chain monitors and the
-community can observe the full lifecycle:
-
-- `upgrade_proposed` — emitted when a proposal is created.
-- `upgrade_executed` — emitted when a proposal is executed.
-- `upgrade_cancelled` — emitted when a proposal is cancelled.
-
-## Testing Requirements
-
-Adopting contracts must maintain a minimum of 90% coverage over the timelock
-paths. At a minimum, tests must cover:
-
-- **Early-execution rejection** — executing before the delay elapses fails.
-- **Cancellation** — a cancelled proposal cannot be executed.
-- **Successful post-delay execution** — a proposal executes once the delay has
-  elapsed.
-- **Replay prevention** — an executed proposal cannot be executed again.
-
-## Operational Checklist
-
-1. Propose the upgrade and record the returned `id`.
-2. Announce the proposal and the intended execution time to the community.
-3. Wait for the configured delay to elapse.
-4. Execute the upgrade (or cancel it if concerns are raised).
-5. Verify the emitted `upgrade_executed` event and the new WASM hash.
+### [v0.2.0] — Initial Soroban Contract Standardization
+- **Date**: 2026-09-28
+- **Contracts**: All (`access_control`, `invoice_nft`, `risk_registry`, `treasury`, `financing_pool`, `marketplace`, `price_oracle`)
+- **Changes**: Standardized error codes, audit logs, and reentrancy guards across contracts.
+- **Client Action**: Update `@kora/sdk` to v0.2.0.

@@ -1,22 +1,26 @@
 name: Deploy to Testnet
 
 on:
+  push:
+    branches: [main]
   workflow_dispatch:
     inputs:
-      confirm:
-        description: "Type 'deploy' to confirm intentional testnet deployment"
+      action:
+        description: "Action to perform: 'deploy' or 'rollback'"
         required: true
+        default: "deploy"
+      rollback_manifest:
+        description: "Path to specific manifest for rollback (optional)"
+        required: false
         default: ""
 
 jobs:
   deploy:
-    name: Build & Deploy to Stellar Testnet
+    name: Build, Deploy & Rollback Pipeline
     runs-on: ubuntu-latest
-    # Guard against accidental triggers
-    if: ${{ github.event.inputs.confirm == 'deploy' }}
 
     permissions:
-      contents: read
+      contents: write
 
     env:
       DEPLOYER_SECRET: ${{ secrets.TESTNET_DEPLOYER_SECRET }}

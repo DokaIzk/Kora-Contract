@@ -202,3 +202,11 @@ jobs:
                 body: fullBody,
               });
             }
+
+      - name: Enforce Interface Compatibility Gate
+        if: steps.report.outputs.breaking == '1'
+        run: |
+          echo "Checking PR labels for 'interface-break-acknowledged' override..."
+          PR_LABELS="${{ toJson(github.event.pull_request.labels.*.name) }}"
+          bash scripts/check-interface-compat.sh specs/main specs/pr "$PR_LABELS"
+
