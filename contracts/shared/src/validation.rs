@@ -48,17 +48,10 @@ pub fn require_non_negative_amount(amount: i128) -> Result<(), CommonError> {
 /// assert!(require_amount_within_bounds(101, 100).is_err());
 /// assert!(require_amount_within_bounds(-1, 100).is_err());
 /// ```
-pub fn require_amount_within_bounds(amount: i128, min: i128, max: i128) -> Result<(), KoraError> {
-    if amount < min || amount > max {
-        return Err(KoraError::InvalidAmount);
-/// Reject amounts outside [0, max].
-#[inline]
 pub fn require_amount_within_bounds(amount: i128, max: i128) -> Result<(), CommonError> {
     if amount < 0 || amount > max {
         return Err(CommonError::InvalidAmount);
     }
-    Ok(())
-}
     Ok(())
 }
 
@@ -209,7 +202,7 @@ pub fn require_max_length_bytes(b: &Bytes, max_bytes: u32) -> Result<(), CommonE
 #[inline]
 pub fn require_exact_length(b: &Bytes, expected_len: u32) -> Result<(), CommonError> {
     if b.len() != expected_len {
-        return Err(CommonError::InvalidLength);
+        return Err(CommonError::EmptyBytes);
     }
     Ok(())
 }
@@ -229,7 +222,7 @@ pub const MAX_BATCH_MINT_SIZE: u32 = 25;
 #[inline]
 pub fn require_batch_size_within_limit(batch_size: u32) -> Result<(), CommonError> {
     if batch_size > MAX_BATCH_MINT_SIZE {
-        return Err(CommonError::BatchSizeExceeded);
+        return Err(CommonError::InvalidAmount);
     }
     Ok(())
 }

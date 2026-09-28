@@ -10,6 +10,12 @@ import {
   xdr,
   Address,
 } from "@stellar/stellar-sdk";
+import {
+  classifyTransaction,
+  TransactionOutcomeUnknownError,
+  withUnknownOutcome,
+} from "./transactionRecovery";
+import type { TransactionReconciliation } from "./transactionRecovery";
 
 export interface NetworkConfig {
   rpcUrl: string;
@@ -54,6 +60,17 @@ export class BaseClient {
     this.networkPassphrase = network.networkPassphrase;
   }
 
+  async reconcileTransaction(hash: string): Promise<TransactionReconciliation> {
+    const response = await this.server.getTransaction(hash);
+    return classifyTransaction(
+      hash,
+      response.status,
+      response.status === rpc.Api.GetTransactionStatus.SUCCESS
+        ? (response as rpc.Api.GetSuccessfulTransactionResponse).returnValue
+        : undefined
+    );
+  }
+
   protected async invoke(
     method: string,
     args: xdr.ScVal[],
@@ -66,6 +83,7 @@ export class BaseClient {
       try {
         return await this.invokeOnce(method, args, keypair, options);
       } catch (error) {
+        if (error instanceof TransactionOutcomeUnknownError) throw error;
         lastError = error;
       }
     }
@@ -102,21 +120,22 @@ export class BaseClient {
 
     const prepared = await this.server.prepareTransaction(tx);
     prepared.sign(keypair);
-    const response = await this.server.sendTransaction(prepared);
+    const localHash = prepared.hash().toString("hex");
+    const response = await withUnknownOutcome(localHash, () => this.server.sendTransaction(prepared));
     if (response.status === "ERROR") throw new Error(JSON.stringify(response.errorResult));
+    const hash = response.hash || localHash;
     // Poll for completion, bounded by a wall-clock deadline so a dropped
     // transaction or an RPC outage can't hang callers indefinitely.
     const deadline = Date.now() + TRANSACTION_POLL_TIMEOUT_MS;
-    let getResponse = await this.server.getTransaction(response.hash);
-    while (getResponse.status === rpc.Api.GetTransactionStatus.NOT_FOUND) {
-      if (Date.now() >= deadline) {
-        throw new Error(
-          `Timed out waiting for transaction ${response.hash} to be included after ${TRANSACTION_POLL_TIMEOUT_MS}ms`
-        );
+    const getResponse = await withUnknownOutcome(hash, async () => {
+      let current = await this.server.getTransaction(hash);
+      while (current.status === rpc.Api.GetTransactionStatus.NOT_FOUND) {
+        if (Date.now() >= deadline) throw new TransactionOutcomeUnknownError(hash);
+        await new Promise((r) => setTimeout(r, TRANSACTION_POLL_INTERVAL_MS));
+        current = await this.server.getTransaction(hash);
       }
-      await new Promise((r) => setTimeout(r, TRANSACTION_POLL_INTERVAL_MS));
-      getResponse = await this.server.getTransaction(response.hash);
-    }
+      return current;
+    });
     if (getResponse.status !== rpc.Api.GetTransactionStatus.SUCCESS) {
       throw new Error(`Transaction failed: ${getResponse.status}`);
     }
