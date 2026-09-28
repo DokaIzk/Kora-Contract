@@ -1005,6 +1005,16 @@ pub fn bid_accepted(
 
 // ── Admin Audit Trail ─────────────────────────────────────────────────────────
 
+/// Emitted when a pending upgrade is cancelled before execution.
+/// Schema: (admin, timestamp)
+pub fn upgrade_cancelled(env: &Env, admin: &Address) {
+    emit(
+        env,
+        symbol_short!("UPG_CNCL"),
+        (admin.clone(), env.ledger().timestamp()),
+    );
+}
+
 /// Canonical admin-action audit event emitted alongside every admin-gated call.
 /// Subscribe to `ADM_AUDIT` across all protocol contracts to build a consolidated
 /// off-chain compliance report via Horizon, Mercury, or a custom indexer.
@@ -1074,7 +1084,6 @@ pub fn position_share_created(
 ) {
     emit(
         env,
-        symbol_short!("POS_SHR_CR"),
         symbol_short!("SHARE_CRT"),
         (
             invoice_id,
@@ -1098,7 +1107,6 @@ pub fn position_share_transferred(
 ) {
     emit(
         env,
-        symbol_short!("POS_SHR_TR"),
         symbol_short!("SHARE_TRF"),
         (
             invoice_id,
@@ -1120,7 +1128,7 @@ pub fn share_listed_for_sale(
 ) {
     emit(
         env,
-        symbol_short!("SHARE_SALE"),
+        symbol_short!("SHR_SALE"),
         (
             invoice_id,
             share_index,
@@ -1140,7 +1148,7 @@ pub fn share_sold(
 ) {
     emit(
         env,
-        symbol_short!("SHARE_SOLD"),
+        symbol_short!("SHR_SOLD"),
         (
             invoice_id,
             share_index,

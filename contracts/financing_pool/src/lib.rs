@@ -9,8 +9,10 @@ use kora_shared::{
 };
 use kora_marketplace::MarketplaceContractClient;
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Map, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, Map, Symbol, Vec,
 };
+
+pub const SCHEMA_VERSION: u32 = 1;
 
 const MAX_AMOUNT: i128 = i128::MAX / 2;
 
@@ -127,6 +129,8 @@ pub enum DataKey {
     ShareSaleOffer(u64, Address, u32),
     /// Dispute resolution contract address (#565).
     DisputeResolution,
+    /// Instance schema version; absent on deployments predating this framework.
+    SchemaVersion,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -136,6 +140,25 @@ pub struct FinancingPoolContract;
 
 #[contractimpl]
 impl FinancingPoolContract {
+    /// Explicit admin migration. Legacy deployments start at version zero.
+    pub fn migrate_versions(
+        env: Env, admin: Address, from_version: u32, to_version: u32,
+    ) -> Result<(), FinancingPoolError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        let key = DataKey::SchemaVersion.into_val(&env);
+        kora_shared::migration::migrate(&env, &key, from_version, to_version, SCHEMA_VERSION,
+            |old, new| match (old, new) {
+                (0, 1) => Ok(()), // Existing pool data retains its encoding.
+                _ => Err(FinancingPoolError::InvalidMigrationTarget),
+            })?;
+        Ok(())
+    }
+
+    pub fn schema_version(env: Env) -> u32 {
+        kora_shared::migration::read_version(&env, &DataKey::SchemaVersion.into_val(&env))
+    }
+
     /// One-time initialization. Wires up all cross-contract dependencies and configures pool parameters.
     ///
     /// **Parameters:**
@@ -198,6 +221,7 @@ impl FinancingPoolContract {
         env.storage().instance().set(&DataKey::MaxPositionBps, &max_position_bps);
         env.storage().instance().set(&DataKey::GracePeriod, &grace_period);
         env.storage().instance().set(&DataKey::DisputeResolution, &dispute_resolution);
+        env.storage().instance().set(&DataKey::SchemaVersion, &SCHEMA_VERSION);
         Ok(())
     }
 
@@ -839,6 +863,10 @@ impl FinancingPoolContract {
     ) -> Result<(), FinancingPoolError> {
         payer.require_auth();
 
+        if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
+            return Err(FinancingPoolError::EscrowPending);
+        }
+
         if amount <= 0 || amount > MAX_AMOUNT {
             return Err(FinancingPoolError::InvalidAmount);
         }
@@ -939,6 +967,9 @@ impl FinancingPoolContract {
         token: Address,
         amount: i128,
     ) -> Result<(), FinancingPoolError> {
+        if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
+            return Err(FinancingPoolError::EscrowPending);
+        }
         // ── #584: hoist NFT contract address read once for the entire repay call.
         // Used for freeze check, invoice fetch, and set_repaid — avoids 3 separate
         // instance storage reads.
@@ -1222,6 +1253,10 @@ impl FinancingPoolContract {
 
         for i in 0..n {
             let invoice_id = invoice_ids.get(i).unwrap();
+
+            if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
+                return Err(FinancingPoolError::EscrowPending);
+            }
 
             // Frozen check
             if nft_client.is_invoice_frozen(&invoice_id) {
@@ -1531,6 +1566,10 @@ impl FinancingPoolContract {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         Self::require_not_paused(&env)?;
+
+        if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
+            return Err(FinancingPoolError::EscrowPending);
+        }
 
         if env.storage().persistent().has(&DataKey::RepaymentLock(invoice_id)) {
             return Err(FinancingPoolError::Unauthorized);
@@ -2668,6 +2707,19 @@ mod tests {
     fn test_initialize_success() {
         let (_env, _admin, _nft, _treasury, _ac, client) = setup();
         assert!(client.try_get_pool(&1u64).is_err()); // No pools yet
+    }
+
+    #[test]
+    fn schema_migration_is_explicit_and_idempotent() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        assert_eq!(client.schema_version(), SCHEMA_VERSION);
+        env.as_contract(&client.address, || env.storage().instance().remove(&DataKey::SchemaVersion));
+        assert_eq!(client.schema_version(), 0);
+        client.migrate_versions(&admin, &0, &1);
+        client.migrate_versions(&admin, &0, &1);
+        assert_eq!(client.schema_version(), 1);
+        assert_eq!(client.try_migrate_versions(&admin, &0, &2).unwrap_err().unwrap(),
+            FinancingPoolError::InvalidMigrationTarget);
     }
 
     #[test]

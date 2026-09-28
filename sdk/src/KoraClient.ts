@@ -56,6 +56,10 @@ export class KoraClient {
     return Promise.all(invoiceIds.map((invoiceId) => this.invoiceNft.getInvoice(invoiceId)));
   }
 
+  async reconcileTransaction(hash: string) {
+    return this.invoiceNft.reconcileTransaction(hash);
+  }
+
   async batchGetListings(invoiceIds: bigint[]) {
     return Promise.all(invoiceIds.map((invoiceId) => this.marketplace.getListing(invoiceId)));
   }

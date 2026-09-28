@@ -196,3 +196,67 @@ mod issue_470_concentration_cap {
         assert!(result.is_err(), "Contributing over cumulative cap should fail");
     }
 }
+
+#[cfg(test)]
+mod issue_748_protocol_debtor_cap {
+    use kora_invoice_nft::{InvoiceNftContract, InvoiceNftContractClient};
+    use kora_marketplace::{DataKey as MarketplaceKey, MarketplaceContract, MarketplaceContractClient};
+    use kora_shared::{errors::KoraError, types::RiskTier};
+    use soroban_sdk::{testutils::{Address as _, Ledger, LedgerInfo}, Address, Bytes, Env, String, Symbol};
+
+    #[test]
+    fn repayment_and_default_release_protocol_exposure_once() {
+        let env = Env::default();
+        env.mock_all_auths();
+        env.ledger().set(LedgerInfo {
+            timestamp: 1_700_000_000, protocol_version: 21, sequence_number: 1,
+            network_id: Default::default(), base_reserve: 10,
+            min_temp_entry_ttl: 1_000, min_persistent_entry_ttl: 1_000,
+            max_entry_ttl: 600_000,
+        });
+        let admin = Address::generate(&env);
+        let sme = Address::generate(&env);
+        let ac = env.register_contract(None, kora_access_control::AccessControlContract);
+        let nft_id = env.register_contract(None, InvoiceNftContract);
+        let nft = InvoiceNftContractClient::new(&env, &nft_id);
+        nft.initialize(&admin, &ac);
+        let marketplace_id = env.register_contract(None, MarketplaceContract);
+        let marketplace = MarketplaceContractClient::new(&env, &marketplace_id);
+        let pool = Address::generate(&env);
+        nft.set_authorized_callers(&admin, &marketplace_id, &pool);
+        marketplace.initialize(&admin, &nft_id, &pool, &Address::generate(&env),
+            &ac, &Address::generate(&env), &Address::generate(&env), &50, &0);
+        marketplace.set_debtor_tier_cap(&admin, &RiskTier::C, &200);
+        assert_eq!(marketplace.get_debtor_tier_cap(&RiskTier::C), 200);
+        assert_eq!(marketplace.try_set_debtor_tier_cap(&admin, &RiskTier::C, &-1)
+            .unwrap_err().unwrap(), KoraError::InvalidAmount);
+        let debtor = Bytes::from_slice(&env, &[9; 32]);
+        let cid = String::from_str(&env, "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi");
+        let due = env.ledger().timestamp() + 86_400;
+        let first = nft.mint_invoice(&sme, &debtor, &100, &Symbol::new(&env, "USDC"), &due, &cid, &30, &None);
+        let second = nft.mint_invoice(&sme, &debtor, &100, &Symbol::new(&env, "USDC"), &due, &cid, &30, &None);
+        for id in [first, second] {
+            nft.set_listed(&marketplace_id, &id);
+            nft.set_funded(&pool, &id);
+        }
+        env.as_contract(&marketplace_id, || {
+            env.storage().persistent().set(&MarketplaceKey::DebtorExposure(debtor.clone()), &200i128);
+            env.storage().persistent().set(&MarketplaceKey::InvoiceDebtorExposure(first), &100i128);
+            env.storage().persistent().set(&MarketplaceKey::InvoiceDebtorExposure(second), &100i128);
+            env.storage().persistent().set(&MarketplaceKey::DebtorInvoiceIds(debtor.clone()),
+                &soroban_sdk::vec![&env, first, second]);
+        });
+        nft.set_repaid(&pool, &first);
+        assert_eq!(marketplace.sync_debtor_exposure(&debtor), 100);
+        assert_eq!(marketplace.sync_debtor_exposure(&debtor), 100);
+        env.ledger().set(LedgerInfo {
+            timestamp: due + 1, protocol_version: 21, sequence_number: 2,
+            network_id: Default::default(), base_reserve: 10,
+            min_temp_entry_ttl: 1_000, min_persistent_entry_ttl: 1_000,
+            max_entry_ttl: 600_000,
+        });
+        nft.set_defaulted(&admin, &second);
+        assert_eq!(marketplace.sync_debtor_exposure(&debtor), 0);
+        assert_eq!(marketplace.get_debtor_exposure(&debtor), 0);
+    }
+}
