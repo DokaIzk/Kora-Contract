@@ -129,3 +129,15 @@ path = "issue_471_secondary_market_settlement.rs"
 [[test]]
 name = "auth_fuzzing"
 path = "auth_fuzzing.rs"
+
+# ── New Wave Security Deliverables ───────────────────────────────────────────
+
+# Timelock upgrade rollback verification
+[[test]]
+name = "timelock_rollback_verification"
+path = "timelock_rollback_verification.rs"
+
+# Cross-contract authorization boundary tests
+[[test]]
+name = "cross_contract_boundaries"
+path = "cross_contract_boundaries.rs"

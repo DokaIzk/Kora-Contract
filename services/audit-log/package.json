@@ -9,6 +9,7 @@
     "start": "node dist/index.js",
     "dev": "ts-node src/index.ts",
     "verify": "node dist/verify.js",
+    "cross-verify": "ts-node src/cross-verify.ts",
     "test": "jest --coverage --coverageThreshold='{\"global\":{\"lines\":90,\"branches\":90,\"functions\":90,\"statements\":90}}'",
     "lint": "eslint src tests --ext .ts"
   },
