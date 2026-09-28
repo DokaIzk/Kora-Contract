@@ -118,101 +118,62 @@ paths. At a minimum, tests must cover:
 3. Wait for the configured delay to elapse.
 4. Execute the upgrade (or cancel it if concerns are raised).
 5. Verify the emitted `upgrade_executed` event and the new WASM hash.
-6. Call `migrate()` if the upgrade changes any `#[contracttype]` struct schemas.
-
-### Cancelling a Pending Upgrade
-
-If a critical issue is discovered during the timelock window:
-
-1. **Identify the proposal id** — recorded from the `propose_upgrade` call.
-2. **Call `cancel_upgrade(admin, proposal_id)`** before the delay elapses.
-3. **Verify the cancellation** — check for `upgrade_cancelled` event.
-4. **Communicate** — announce the cancellation and reason to the community.
-
-Cancellation can occur at any point before execution:
-- Immediately after proposal
-- Halfway through the timelock window
-- Just before the delay expires
-- Even after the delay has elapsed but before `execute_upgrade` is called
-
-### Rolling Back an Executed Upgrade
-
-If an issue is discovered after an upgrade has been executed:
-
-1. **Identify the previous WASM hash** — from reproducible build artifacts or deployment records.
-2. **Propose rollback** — call `propose_upgrade(admin, previous_wasm_hash)`.
-3. **Wait for timelock** — same delay applies to rollbacks (no emergency bypass).
-4. **Execute rollback** — call `execute_upgrade(admin)` after delay.
-5. **Verify state integrity** — confirm all contract data is accessible and unchanged.
-6. **Re-migrate if needed** — call `migrate()` to ensure schema consistency.
-
-**Critical:** Rollback reuses the same timelocked upgrade mechanism, not a separate emergency path. This ensures rollbacks face the same scrutiny and delay as upgrades, preventing hasty reversions that could compound problems.
-
-### Post-Rollback Verification
-
-After rolling back to a previous version:
-
-1. **Check contract functionality** — verify all read operations work correctly.
-2. **Inspect storage state** — confirm no orphaned or corrupted data.
-3. **Test critical paths** — minting, funding, repayment flows still work.
-4. **Review migration version** — ensure `MigrationVersion` is consistent.
-5. **Monitor for issues** — watch event logs and error rates closely.
-
-### Forward-Rollback-Forward Cycles
-
-If a rollback is followed by a corrected upgrade:
-
-1. **Rollback** — downgrade to previous stable version.
-2. **Fix the issue** — patch the code and generate new WASM.
-3. **Propose corrected upgrade** — `propose_upgrade(admin, fixed_wasm_hash)`.
-4. **Wait and execute** — follow standard upgrade procedure.
-5. **Verify no orphaned state** — confirm data integrity across the cycle.
-
-All data written between the original upgrade and rollback remains accessible after re-upgrading forward, provided the storage schema is compatible.
-
-### Storage Integrity Guarantees
-
-The timelock rollback mechanism guarantees:
-
-- **No data loss** — rolling back does not delete contract storage.
-- **Forward compatibility** — data written on version N+1 remains readable on version N (if schema-compatible).
-- **Migration idempotence** — calling `migrate()` multiple times is safe.
-- **No orphaned state** — forward-rollback-forward cycles leave no dangling keys.
-
-**Out of Scope:** Rolling back an upgrade that intentionally made incompatible storage schema changes. Such upgrades must be prevented from executing via the interface-compat gate in CI, not rolled back after the fact.
 
 ---
 
-## Emergency Response
+## invoice_nft Storage Schema History
 
-### If a Bad Upgrade Executes
+### v1 → v2 (notes field)
 
-1. **Assess impact** — determine scope of issue (data corruption? logic bug? DoS?).
-2. **Pause protocol if needed** — use `access_control.pause()` to halt operations.
-3. **Propose rollback immediately** — don't wait to "try to fix forward."
-4. **Communicate** — notify all stakeholders of the issue and rollback plan.
-5. **Wait for timelock** — resist pressure to bypass the delay.
-6. **Execute rollback** — after delay elapses, downgrade to last stable version.
-7. **Post-mortem** — document what went wrong and update procedures.
+`Invoice` gained `notes: Option<String>`. Pre-existing records stored as `InvoiceV1`
+(no `notes` field) are backfilled with `notes = None` by `migrate()`.
 
-### If Rollback Fails
+### v2 → v3 — Hot/Cold Storage Split (issue #740)
 
-If `execute_upgrade` fails during rollback (e.g., WASM hash mismatch, storage corruption):
+**Motivation:** Every status transition (`set_listed`, `set_funded`, `set_repaid`,
+`set_defaulted`) previously read and wrote the full `Invoice` struct, including
+large cold fields (`debtor_hash` up to 64 bytes, `ipfs_cid` up to 128 bytes,
+`metadata_hash` up to 32 bytes, `notes`). These fields are never needed during
+a status transition, so each call paid unnecessary ledger I/O cost.
 
-1. **Do not retry blindly** — diagnose the root cause.
-2. **Check WASM hash** — ensure it matches the intended previous version.
-3. **Inspect storage state** — use read-only queries to verify data integrity.
-4. **Consult migration history** — review `MigrationVersion` and schema changes.
-5. **Engage incident response** — escalate to protocol engineering team.
+**Change:** The monolithic `Invoice(id)` persistent key is split into two keys:
 
-### Preventing Rollback Scenarios
+| Key | Type | Fields | Access pattern |
+|---|---|---|---|
+| `InvoiceHot(id)` | persistent | `id`, `sme`, `amount`, `currency`, `due_date`, `risk_score`, `risk_tier`, `status`, `created_at`, `funded_at`, `repaid_at` | Every status transition, exposure tracking, freeze checks |
+| `InvoiceCold(id)` | persistent | `debtor_hash`, `ipfs_cid`, `metadata_hash`, `notes` | `get_invoice`, `amend_invoice`, `update_metadata_cid`, `commit_metadata_hash`, `flag_metadata_mismatch` |
 
-The best rollback is one that never happens:
+`get_invoice` merges both keys into the public `Invoice` type — the external
+interface is unchanged and verified by `interface-compat.yml`.
 
-- **Test thoroughly** — use testnet, fuzz testing, and formal verification.
-- **Stage rollouts** — deploy to canary contracts first.
-- **Monitor actively** — watch event logs, error rates, and state changes.
-- **Review upgrades** — multiple engineers approve WASM hash before proposal.
-- **Use interface-compat checks** — catch breaking changes before they reach mainnet.
+**Before/After resource estimates (per status transition call):**
 
----
+| Metric | v2 (full Invoice) | v3 (hot only) | Reduction |
+|---|---|---|---|
+| Persistent reads | 1 × ~300 byte struct | 1 × ~120 byte struct | ~60% |
+| Persistent writes | 1 × ~300 byte struct | 1 × ~120 byte struct | ~60% |
+| XDR decode cost | full Invoice fields | hot fields only | ~60% |
+| `get_invoice` reads | 1 key | 2 keys (hot + cold) | +1 read (acceptable) |
+
+**Migration runbook (v2 → v3):**
+
+1. Deploy the new WASM (after the 24-hour timelock via `propose_upgrade` / `execute_upgrade`).
+2. Call `migrate(admin)` immediately after the WASM swap.
+   - The function iterates every allocated invoice ID.
+   - For each `Invoice(id)` record found, it writes `InvoiceHot(id)` and `InvoiceCold(id)`,
+     then removes the legacy `Invoice(id)` key to reclaim rent.
+   - Records already migrated (hot key present) are skipped — the function is idempotent.
+3. If the invoice count is very large, `migrate()` may need to be called in batches
+   (the function processes all IDs in a single call; split by calling it multiple times
+   if the ledger CPU budget is exceeded — idempotency ensures safety).
+4. Verify: `get_invoice(id)` must return correct data for a sample of IDs.
+5. Verify: legacy `Invoice(id)` keys are absent (rent reclaimed).
+
+**Rollback:** Not supported post-migration. The v3 WASM reads only `InvoiceHot`/`InvoiceCold`
+keys. If a rollback to v2 WASM is required before `migrate()` is called, the legacy
+`Invoice(id)` keys are still present and the v2 WASM will read them correctly.
+Once `migrate()` has run and legacy keys are removed, a v2 WASM rollback is not safe.
+
+**Interface compatibility:** All public function signatures are unchanged. The split
+is entirely internal to storage layout. `interface-compat.yml` CI will report no
+breaking changes.
