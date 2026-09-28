@@ -30,14 +30,20 @@ LOOP_RE = re.compile(r"\b(for|while|loop)\b")
 # Identifiers that indicate an explicit, reviewed upper bound.
 BOUND_PATTERNS = (
     "MAX_BATCH_SIZE",
+    "MAX_BATCH_MINT_SIZE",  # New: batch minting bound (wave feature)
     "MAX_BATCH",
     "MAX_INVOICES",
+    "MAX_VERIFIERS",  # New: multi-verifier aggregation bound (wave feature)
+    "MAX_ATTESTORS",  # New: alternative attestor bound naming
+    "MAX_WITHDRAWAL_QUEUE",  # New: withdrawal queue processing bound (wave feature)
     "MAX_ITEMS",
     "MAX_LEN",
     "MAX_COUNT",
     "MAX_SIZE",
     "BATCH_LIMIT",
     "MAX_LOOP",
+    "MAX_NETTING_INVOICES",  # New: cross-invoice netting bound
+    "MAX_POSITIONS",  # New: position enumeration bound
     "LIMIT",
     "CAP",
 )

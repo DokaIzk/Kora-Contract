@@ -5,16 +5,18 @@ members = [
     "contracts/marketplace",
     "contracts/financing_pool",
     "contracts/treasury",
+    "contracts/referral_rewards",
     "contracts/risk_registry",
     "contracts/access_control",
     "contracts/price_oracle",
     "contracts/tranche",
     "contracts/dispute_resolution",
+    "contracts/fractionalizer",
     "contracts/tests",
     "contracts/xtask",
     "contracts/fuzz",
-    "services/analytics",
-    "services/public-api",
+    "contracts/governance",
+    "services/indexer",
 ]
 # contracts/fuzz/fuzz is the cargo-fuzz (libFuzzer, nightly) crate. It is built
 # only by `cargo fuzz`, never as part of the workspace.

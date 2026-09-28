@@ -10,6 +10,9 @@ on:
 # Adjust per contract as needed.
 env:
   SIZE_THRESHOLD_BYTES: 10240
+  # Percentage growth in WASM size or estimated cost units that triggers the
+  # xtask regression guard.  Override per-PR with a workflow_dispatch input.
+  METRICS_THRESHOLD_PCT: 5
 
 jobs:
   wasm-size:

@@ -3,15 +3,12 @@
  * Issue #766
  */
 
-import * as dotenv from "dotenv";
 import { ExchangeRateApiSource, CurrencyApiSource } from "./sources";
 import { CrossChecker } from "./crosscheck";
 import { OracleRelay } from "./relay";
 import { IngestionEngine } from "./engine";
 import { FxIngestionConfig, CurrencyCode } from "./types";
 import pino from "pino";
-
-dotenv.config();
 
 const logger = pino({ name: "fx-ingestion" });
 

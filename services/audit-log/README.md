@@ -58,6 +58,67 @@ npm run verify -- --db ./audit.db
 
 ---
 
+## Cross-Verification Tool
+
+Independently verifies consistency between the off-chain hash-chained audit log and the on-chain event history (`ADM_AUDIT` topic from Soroban contracts). This tool provides the critical cross-check that validates the two independent audit trails agree on what admin actions occurred.
+
+```bash
+# Cross-verify on-chain events with off-chain audit log
+npm run cross-verify -- \
+  --db ./audit.db \
+  --rpc https://soroban-testnet.stellar.org \
+  --contracts CABC123...,CDEF456... \
+  --start-timestamp 1633046400000 \
+  --end-timestamp 1633132800000 \
+  --skew-tolerance-ms 60000
+
+# Exit codes:
+#   0  trails consistent
+#   1  divergence detected (detailed report on stderr)
+#   2  configuration error
+```
+
+### Parameters:
+
+| Flag | Required | Description |
+|---|---|---|
+| `--db` | Yes | Path to SQLite audit log database |
+| `--rpc` | Yes | Soroban RPC URL for fetching on-chain events |
+| `--contracts` | Yes | Comma-separated list of contract IDs to query |
+| `--start-timestamp` | No | Unix timestamp (ms) for start of range (default: 0) |
+| `--end-timestamp` | No | Unix timestamp (ms) for end of range (default: now) |
+| `--skew-tolerance-ms` | No | Acceptable timing difference between trails (default: 60000ms) |
+
+### What It Checks:
+
+1. **Action presence**: Every on-chain admin action has a corresponding off-chain record (and vice versa, when expected)
+2. **Actor correspondence**: The actor (address) matches across both trails (compared via SHA-256 hash)
+3. **Timing consistency**: Timestamps are within tolerance (benign clock skew acceptable)
+4. **Semantic equivalence**: On-chain action types map to expected off-chain action types
+
+### Output:
+
+The tool generates a detailed report showing:
+- Total events/records in each trail
+- Number matched, timing skew within tolerance, and missing from either side
+- Detailed breakdown of each mismatch with specific reasons
+
+### When to Run:
+
+- **On-demand**: After any suspected tampering or data integrity issue
+- **Scheduled**: Daily/weekly automated runs feeding into monitoring/alerting
+- **Before audits**: Proactive verification before external security audits
+
+### Action Correspondence:
+
+The tool defines semantic mappings between on-chain `AdminActionType` and off-chain `AuditAction`:
+
+- `Pause`, `Unpause`, `GrantRole`, `RevokeRole`, etc. → `admin.relay.transaction.confirmed`
+- `RecordDefault` → `debtor.verification.completed`
+- Direct contract calls (e.g., `CorrectMetadataHash`) may have no off-chain counterpart (acceptable)
+
+---
+
 ## Integration (other services)
 
 ```typescript
