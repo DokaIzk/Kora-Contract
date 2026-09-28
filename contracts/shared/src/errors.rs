@@ -116,7 +116,6 @@ pub enum KoraError {
     ListingAlreadyFunded = 125,
 
     // access_control / marketplace multisig admin-action governance
-    AlreadyVoted = 113,
     AlreadyApproved = 126,
     ProposalNotFound = 140,
     ProposalAlreadyExecuted = 141,
@@ -127,7 +126,6 @@ pub enum KoraError {
     MultisigApprovalRequired = 146,
     QuorumRequired = 147,
     UnauthorizedCaller = 148,
-    InvalidParameterValue = 149,
 
     // marketplace dependency-migration and token-whitelist timelocks (#443-#446)
     DependencyUpdateTimelockNotElapsed = 150,
@@ -174,4 +172,6 @@ pub enum CommonError {
     ArithmeticUnderflow = 11,
     /// Reentrancy guard triggered.
     Reentrancy = 12,
+    InvalidLength = 13,
+    BatchSizeExceeded = 14,
 }
