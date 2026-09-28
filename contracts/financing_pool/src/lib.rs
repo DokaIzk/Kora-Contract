@@ -1,5 +1,18 @@
 #![no_std]
 
+// Formal verification model — host-only (requires std).
+// Gated so it never gets compiled into the WASM binary.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod verification {
+    pub mod model {
+        include!("../verification/model.rs");
+    }
+    pub mod invariants {
+        use super::model;
+        include!("../verification/invariants.rs");
+    }
+}
+
 use kora_shared::{
     errors::CommonError,
     events,

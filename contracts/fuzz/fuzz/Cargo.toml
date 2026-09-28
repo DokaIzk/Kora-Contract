@@ -64,3 +64,10 @@ path = "fuzz_targets/fuzz_price_oracle.rs"
 test = false
 doc = false
 bench = false
+
+[[bin]]
+name = "fuzz_marketplace_fee"
+path = "fuzz_targets/fuzz_marketplace_fee.rs"
+test = false
+doc = false
+bench = false
