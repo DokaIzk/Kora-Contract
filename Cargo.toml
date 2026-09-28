@@ -7,6 +7,7 @@ members = [
     "contracts/treasury",
     "contracts/referral_rewards",
     "contracts/risk_registry",
+    "contracts/verifier_nomination",
     "contracts/access_control",
     "contracts/price_oracle",
     "contracts/tranche",
