@@ -52,6 +52,13 @@ Indexer (deadline data)
 | `KEEPER_HTTP_PORT` | `8080` | Observability HTTP port |
 | `STELLAR_NETWORK_PASSPHRASE` | testnet | Network passphrase |
 
+In deployed environments, inject `KEEPER_SECRET` and any RPC credentials from
+the environment-specific secret in AWS Secrets Manager using the workload's
+read-only role. Do not add credentials to deployment files or `.env` files.
+For local work, use disposable testnet credentials in a mode-`0600` file under
+`$HOME/.config/kora/` and source it into the process environment; never use
+production credentials locally. See [the secrets runbook](../../infra/secrets/README.md).
+
 ---
 
 ## Observability endpoints
@@ -60,6 +67,7 @@ Indexer (deadline data)
 |---|---|
 | `GET /health` | Liveness check |
 | `GET /status` | Job counts by status |
+| `GET /metrics` | Prometheus keeper job gauges |
 | `GET /history` | Last 200 job records |
 
 ---
@@ -69,8 +77,12 @@ Indexer (deadline data)
 ```bash
 npm install
 npm run build
-KEEPER_SECRET=S... npm start
+npm start
 ```
+
+Start the service only after its environment has been populated through the
+local testnet secret file or the deployment secret manager. Do not place secret
+values directly in shell command history.
 
 ## Testing
 

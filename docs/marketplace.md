@@ -337,3 +337,17 @@ Relevant errors:
 | `AlreadyVoted` | Signer has already approved this proposal |
 | `ParameterProposalNotFound` | No proposal exists with the given id |
 | `ParameterProposalAlreadyExecuted` | Proposal has already been executed |
+
+## Protocol-wide debtor concentration limits (#748)
+
+The marketplace tracks gross outstanding funding per debtor hash across invoices in `DebtorExposure(debtor_hash)`. This is separate from the existing per-investor share cap and per-token listing cap. Admins set fixed, nonnegative limits with `set_debtor_tier_cap(admin, tier, cap)`; `0` disables a tier limit. `get_debtor_tier_cap(tier)` and `get_debtor_exposure(debtor_hash)` expose the configured and recorded values.
+
+The debtor's tier comes from active verifier scores in `risk_registry.get_debtor_risk_tier`, using that registry's current tier boundaries. Once any cap is enabled, a debtor without an active score cannot list or receive further funding. Listing checks projected outstanding exposure plus its full asking price. Each funding call checks again against the current tier and adds its gross listing-token amount; the exact cap is allowed and the next unit is rejected. A listed invoice can therefore stop accepting funds if another invoice uses the debtor's remaining capacity or its score worsens.
+
+`claim_refund` subtracts the investor's gross funded amount (net contribution plus fee) once. Fully repaid or defaulted invoices release their remaining recorded exposure through the permissionless `sync_debtor_exposure(debtor_hash)` call. Listing and funding also sync terminal invoices for that debtor before checking the cap. The sync reads canonical `invoice_nft` status, so callers cannot release exposure by claiming that an invoice settled; repeated syncs have no further effect. Operators should invoke sync after a repayment or default for prompt dashboard updates. Settlement remains independent of marketplace availability.
+
+Sync a terminal invoice **before** archiving its NFT record. Once that record is removed, the marketplace cannot independently verify its terminal status and retains its exposure until an explicit migration/recovery procedure handles the archived record.
+
+The active invoice index is limited to 256 per debtor to bound reconciliation cost. Entries use the repository's persistent storage TTL convention; operators must maintain contract/storage lifetimes. Existing funded invoices created before the exposure ledger was deployed are not automatically backfilled. Backfill or settle those records before enabling caps on an upgraded deployment.
+
+Caps and exposure are in gross listing-token base units. A common token denomination (or an agreed normalization policy before enabling multiple currencies) is required for economically comparable protocol-wide limits; the current implementation does not recalculate caps from live TVL or exchange rates.

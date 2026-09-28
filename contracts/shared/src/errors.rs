@@ -93,8 +93,6 @@ pub enum KoraError {
     AlreadyVoted = 113,
     GovernanceThresholdNotMet = 114,
     GovernanceTimelockNotElapsed = 115,
-    InvalidParameterValue = 116,
-
     // Cooldown between debtor risk score updates
     ScoreUpdateCooldownNotElapsed = 117,
 
