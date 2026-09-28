@@ -1,0 +1,74 @@
+groups:
+  - name: kora-service-health
+    rules:
+      - alert: KoraHealthAggregatorUnavailable
+        expr: up{job="kora-health"} == 0
+        for: 2m
+        labels:
+          severity: critical
+          tier: sev-1
+        annotations:
+          summary: Kora health aggregator is unavailable
+          description: The aggregated health endpoint has been unreachable for at least two minutes.
+
+      - alert: KoraServiceUnavailable
+        expr: up{job=~"kora-(keeper|indexer)"} == 0
+        for: 3m
+        labels:
+          severity: warning
+          tier: sev-3
+        annotations:
+          summary: Kora service {{ $labels.job }} is unavailable
+          description: The service metrics endpoint has been unreachable for at least three minutes.
+
+      - alert: KoraAggregatedServiceDown
+        expr: kora_service_health{status="down"} == 1
+        for: 2m
+        labels:
+          severity: warning
+          tier: sev-3
+        annotations:
+          summary: Kora service {{ $labels.service }} is down
+          description: The health aggregator has reported this service down for at least two minutes.
+
+      - alert: KoraKeeperDeadLetterJobs
+        expr: kora_keeper_jobs{status="dead"} > 0
+        for: 5m
+        labels:
+          severity: warning
+          tier: sev-3
+        annotations:
+          summary: Keeper has jobs requiring operator review
+          description: '{{ $value }} keeper jobs are in the dead-letter state.'
+
+  - name: kora-onchain-events
+    rules:
+      - alert: KoraCircuitBreakerTripped
+        expr: increase(kora_onchain_events_total{event_type="circuit_breaker_trip"}[5m]) > 0
+        for: 1m
+        labels:
+          severity: critical
+          tier: sev-1
+        annotations:
+          summary: Kora circuit breaker tripped
+          description: A circuit-breaker trip was observed in the last five minutes. Follow the Sev-1 incident runbook.
+
+      - alert: KoraInvoiceDefaultObserved
+        expr: increase(kora_onchain_events_total{event_type="default"}[15m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          tier: sev-2
+        annotations:
+          summary: Kora invoice default event observed
+          description: A default event was observed. Defaults can be expected protocol events; investigate context before escalation.
+
+      - alert: KoraTreasurySweepObserved
+        expr: increase(kora_onchain_events_total{event_type="treasury_sweep"}[15m]) > 0
+        for: 2m
+        labels:
+          severity: warning
+          tier: sev-3
+        annotations:
+          summary: Kora treasury sweep observed
+          description: Verify the sweep amount and authorized transaction; expected sweeps do not page on-call.

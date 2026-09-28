@@ -14,6 +14,13 @@ This directory contains the off-chain backend services that complement the on-ch
 
 All services are TypeScript, independently deployable, and share no runtime dependencies on each other. The `audit-log` service is consumed as a library by the others.
 
+Production and testnet credentials are delivered per service and environment
+from AWS Secrets Manager using workload-specific read roles. Service code reads
+the injected environment variables; it does not load `.env` files. Use only
+disposable testnet values for local development. See
+[`infra/secrets/`](../infra/secrets/README.md) for isolation, IAM, and rotation
+requirements.
+
 ## Quick start
 
 ```bash
