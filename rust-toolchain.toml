@@ -1,0 +1,14 @@
+# =============================================================================
+# Kora Protocol — Pinned Rust Toolchain
+#
+# This file pins the exact Rust toolchain used to produce canonical WASM
+# binaries. Any contributor rebuilding from source MUST use this exact
+# version to obtain byte-identical output.
+#
+# To verify: rustup show active-toolchain
+# To install: rustup toolchain install 1.75.0
+# =============================================================================
+[toolchain]
+channel = "1.75.0"
+components = ["rustfmt", "clippy"]
+targets = ["wasm32-unknown-unknown"]

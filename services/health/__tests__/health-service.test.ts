@@ -9,6 +9,7 @@
  */
 
 import { HealthAggregator, HealthFetcher, UpstreamService } from "../health-aggregator";
+import { renderPrometheusMetrics } from "../http-server";
 import { classifyServiceStatus, rollupStatus } from "../sla-classifier";
 import { ServiceHealthReport, ServiceSlaConfig } from "../types";
 
@@ -164,5 +165,27 @@ describe("HealthAggregator — report shape", () => {
     expect(names).toContain("indexer");
     expect(names).toContain("api");
     expect(names).toContain("keeper");
+  });
+});
+
+describe("renderPrometheusMetrics", () => {
+  it("exports service status gauges and numeric health metrics", () => {
+    const output = renderPrometheusMetrics({
+      overall: "degraded",
+      aggregatedAt: "2026-09-27T00:00:00.000Z",
+      services: [
+        {
+          name: 'api"east',
+          status: "degraded",
+          metrics: { lagSeconds: 3, detail: "ignored" },
+          unreachable: false,
+        },
+      ],
+    });
+
+    expect(output).toContain('kora_service_health{service="api\\"east",status="degraded"} 1');
+    expect(output).toContain('kora_service_health{service="api\\"east",status="ok"} 0');
+    expect(output).toContain("kora_service_api_east_lagSeconds 3");
+    expect(output).not.toContain("detail");
   });
 });

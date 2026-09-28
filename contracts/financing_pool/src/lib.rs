@@ -855,6 +855,10 @@ impl FinancingPoolContract {
     ) -> Result<(), FinancingPoolError> {
         payer.require_auth();
 
+        if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
+            return Err(FinancingPoolError::EscrowPending);
+        }
+
         if amount <= 0 || amount > MAX_AMOUNT {
             return Err(FinancingPoolError::InvalidAmount);
         }
@@ -955,6 +959,9 @@ impl FinancingPoolContract {
         token: Address,
         amount: i128,
     ) -> Result<(), FinancingPoolError> {
+        if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
+            return Err(FinancingPoolError::EscrowPending);
+        }
         // ── #584: hoist NFT contract address read once for the entire repay call.
         // Used for freeze check, invoice fetch, and set_repaid — avoids 3 separate
         // instance storage reads.
@@ -1234,6 +1241,10 @@ impl FinancingPoolContract {
 
         for i in 0..n {
             let invoice_id = invoice_ids.get(i).unwrap();
+
+            if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
+                return Err(FinancingPoolError::EscrowPending);
+            }
 
             // Frozen check
             if nft_client.is_invoice_frozen(&invoice_id) {
@@ -1543,6 +1554,10 @@ impl FinancingPoolContract {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         Self::require_not_paused(&env)?;
+
+        if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
+            return Err(FinancingPoolError::EscrowPending);
+        }
 
         if env.storage().persistent().has(&DataKey::RepaymentLock(invoice_id)) {
             return Err(FinancingPoolError::Unauthorized);

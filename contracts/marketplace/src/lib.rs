@@ -5,7 +5,7 @@ use kora_shared::{
     errors::KoraError,
     events,
     reentrancy::ReentrancyGuard,
-    types::{Listing, RiskTier},
+    types::{InvoiceStatus, Listing, RiskTier},
     validation::{bps_of_normalized, require_non_zero_amount, require_valid_fee_bps, require_within_max_amount, safe_add, safe_sub, UPGRADE_TIMELOCK_DELAY},
 };
 use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, IntoVal, Vec};
@@ -523,6 +523,7 @@ impl MarketplaceContract {
         // The named debtor must carry a risk_registry record meeting the governed
         // minimum before the invoice can be listed on the marketplace.
         Self::require_debtor_verified(&env, &invoice.debtor_hash)?;
+        Self::check_debtor_cap(&env, &invoice.debtor_hash, asking_price)?;
 
         // Enforce the protocol-wide per-token exposure cap (#447) before mutating
         // NFT/listing state, so a rejected listing leaves no partial side effects.
@@ -603,6 +604,7 @@ impl MarketplaceContract {
     ) -> Result<(), KoraError> {
         investor.require_auth();
         Self::require_not_paused(&env)?;
+        let _guard = ReentrancyGuard::new(&env)?;
         Self::fund_invoice_internal(&env, &investor, invoice_id, amount, payment_token.as_ref())
     }
 
@@ -626,6 +628,7 @@ impl MarketplaceContract {
     ) -> Result<soroban_sdk::Vec<BatchAllocationResult>, KoraError> {
         investor.require_auth();
         Self::require_not_paused(&env)?;
+        let _guard = ReentrancyGuard::new(&env)?;
 
         if allocations.is_empty() || allocations.len() > MAX_BATCH_SIZE {
             return Err(KoraError::InvalidAmount);
@@ -790,6 +793,10 @@ impl MarketplaceContract {
             return Err(KoraError::ExceedsFundingTarget);
         }
 
+        // Check before token movement. The entrypoint's reentrancy guard keeps
+        // the state stable until the successful allocation is recorded below.
+        Self::check_debtor_cap(env, &invoice.debtor_hash, listing_amount)?;
+
         let listing_token_client = token::Client::new(env, &listing.token);
         let token_decimals = listing_token_client.decimals();
 
@@ -824,6 +831,16 @@ impl MarketplaceContract {
             (pay_fee, pay_net)
         };
 
+        // Complete fallible local accounting before any external token movement.
+        let funded_after = safe_add(listing.funded_amount, listing_amount)?;
+        let contrib_key = DataKey::Contribution(invoice_id, investor.clone());
+        let prev_contrib: i128 = env.storage().persistent().get(&contrib_key).unwrap_or(0);
+        let contrib_after = safe_add(prev_contrib, net)?;
+        let fee_key = DataKey::FeeContribution(invoice_id, investor.clone());
+        let prev_fee: i128 = env.storage().persistent().get(&fee_key).unwrap_or(0);
+        let fee_after = safe_add(prev_fee, fee)?;
+        Self::add_debtor_exposure(env, &invoice.debtor_hash, invoice_id, listing_amount)?;
+
         let pay_token_client = token::Client::new(env, &pay_token);
         if pay_fee > 0 {
             pay_token_client.transfer(investor, &config.treasury, &pay_fee);
@@ -835,26 +852,14 @@ impl MarketplaceContract {
             pay_token_client.transfer(investor, &config.financing_pool, &pay_net);
         }
 
-        listing.funded_amount = safe_add(listing.funded_amount, listing_amount)?;
+        listing.funded_amount = funded_after;
 
         // Track per-investor net contribution for potential refund
-        let contrib_key = DataKey::Contribution(invoice_id, investor.clone());
-        let prev_contrib: i128 = env
-            .storage()
-            .persistent()
-            .get(&contrib_key)
-            .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&contrib_key, &safe_add(prev_contrib, net)?);
+        env.storage().persistent().set(&contrib_key, &contrib_after);
 
         // Track the investor's fee share so claim_refund can claw it back
         // from the treasury on a failed/cancelled listing. (#450)
-        let fee_key = DataKey::FeeContribution(invoice_id, investor.clone());
-        let prev_fee: i128 = env.storage().persistent().get(&fee_key).unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&fee_key, &safe_add(prev_fee, fee)?);
+        env.storage().persistent().set(&fee_key, &fee_after);
 
         let fully_funded = listing.funded_amount >= listing.asking_price;
         if fully_funded {
@@ -1174,14 +1179,19 @@ impl MarketplaceContract {
         // CEI: mark before external call
         env.storage().persistent().set(&refund_key, &true);
 
-        // Transfer net contribution back from financing pool to investor
         let config = Self::load_config(&env)?;
+        let nft_client = kora_invoice_nft::InvoiceNftContractClient::new(&env, &config.invoice_nft);
+        let invoice = nft_client.get_invoice(&invoice_id);
+        let fee_key = DataKey::FeeContribution(invoice_id, investor.clone());
+        let fee_contributed: i128 = env.storage().persistent().get(&fee_key).unwrap_or(0);
+        Self::remove_debtor_exposure(&env, &invoice.debtor_hash, invoice_id,
+            safe_add(net_contributed, fee_contributed)?)?;
+
+        // Transfer net contribution back from financing pool to investor
         let token_client = token::Client::new(&env, &listing.token);
         token_client.transfer(&config.financing_pool, &investor, &net_contributed);
 
         // Claw back the investor's proportional fee share from the treasury (#450).
-        let fee_key = DataKey::FeeContribution(invoice_id, investor.clone());
-        let fee_contributed: i128 = env.storage().persistent().get(&fee_key).unwrap_or(0);
         if fee_contributed > 0 {
             let treasury_client = kora_treasury::TreasuryContractClient::new(&env, &config.treasury);
             treasury_client.refund_fee(
@@ -1364,6 +1374,118 @@ impl MarketplaceContract {
         if !rr.is_debtor_verified(debtor_hash) {
             return Err(KoraError::ComplianceNotAttested);
         }
+        Ok(())
+    }
+
+    fn debtor_exposure(env: &Env, debtor_hash: &Bytes) -> i128 {
+        env.storage().persistent().get(&DataKey::DebtorExposure(debtor_hash.clone())).unwrap_or(0)
+    }
+
+    fn check_debtor_cap(env: &Env, debtor_hash: &Bytes, additional: i128) -> Result<(), KoraError> {
+        Self::reconcile_debtor(env, debtor_hash)?;
+        let mut any_cap = false;
+        for ordinal in 0..5 {
+            let cap: i128 = env.storage().instance()
+                .get(&DataKey::TierDebtorCap(ordinal)).unwrap_or(0);
+            any_cap |= cap > 0;
+        }
+        if !any_cap { return Ok(()); }
+        let config = Self::load_config(env)?;
+        let rr = kora_risk_registry::RiskRegistryContractClient::new(env, &config.risk_registry);
+        let tier = match rr.get_debtor_risk_tier(debtor_hash) {
+            Some(tier) => tier,
+            // Once a tier limit is configured, missing scores cannot evade it.
+            None => return Err(KoraError::ComplianceNotAttested),
+        };
+        let cap: i128 = env.storage().instance()
+            .get(&DataKey::TierDebtorCap(Self::tier_ordinal(&tier))).unwrap_or(0);
+        let projected = safe_add(Self::debtor_exposure(env, debtor_hash), additional)?;
+        if cap > 0 && projected > cap { return Err(KoraError::ExceedsFundingTarget); }
+        Ok(())
+    }
+
+    fn add_debtor_exposure(
+        env: &Env, debtor_hash: &Bytes, invoice_id: u64, amount: i128,
+    ) -> Result<(), KoraError> {
+        Self::check_debtor_cap(env, debtor_hash, amount)?;
+        let total_key = DataKey::DebtorExposure(debtor_hash.clone());
+        let invoice_key = DataKey::InvoiceDebtorExposure(invoice_id);
+        let before: i128 = env.storage().persistent().get(&invoice_key).unwrap_or(0);
+        if before == 0 {
+            let ids_key = DataKey::DebtorInvoiceIds(debtor_hash.clone());
+            let mut ids: Vec<u64> = env.storage().persistent()
+                .get(&ids_key).unwrap_or_else(|| Vec::new(env));
+            // Bound the reconciliation cost per debtor.
+            if ids.len() >= 256 { return Err(KoraError::ExceedsFundingTarget); }
+            ids.push_back(invoice_id);
+            env.storage().persistent().set(&ids_key, &ids);
+            Self::bump_persistent(env, &ids_key);
+        }
+        env.storage().persistent().set(&invoice_key, &safe_add(before, amount)?);
+        Self::bump_persistent(env, &invoice_key);
+        env.storage().persistent().set(&total_key,
+            &safe_add(Self::debtor_exposure(env, debtor_hash), amount)?);
+        Self::bump_persistent(env, &total_key);
+        Ok(())
+    }
+
+    fn remove_debtor_exposure(
+        env: &Env, debtor_hash: &Bytes, invoice_id: u64, amount: i128,
+    ) -> Result<(), KoraError> {
+        let invoice_key = DataKey::InvoiceDebtorExposure(invoice_id);
+        let before: i128 = env.storage().persistent().get(&invoice_key).unwrap_or(0);
+        // Listings funded before this ledger was introduced have no tracked exposure.
+        if before == 0 { return Ok(()); }
+        let decrease = amount.min(before);
+        let after = safe_sub(before, decrease)?;
+        let total_key = DataKey::DebtorExposure(debtor_hash.clone());
+        env.storage().persistent().set(&total_key,
+            &Self::debtor_exposure(env, debtor_hash).saturating_sub(decrease));
+        Self::bump_persistent(env, &total_key);
+        if after == 0 {
+            env.storage().persistent().remove(&invoice_key);
+            let ids_key = DataKey::DebtorInvoiceIds(debtor_hash.clone());
+            let mut ids: Vec<u64> = env.storage().persistent()
+                .get(&ids_key).unwrap_or_else(|| Vec::new(env));
+            if let Some(index) = ids.first_index_of(invoice_id) { ids.remove(index); }
+            env.storage().persistent().set(&ids_key, &ids);
+            Self::bump_persistent(env, &ids_key);
+        } else {
+            env.storage().persistent().set(&invoice_key, &after);
+            Self::bump_persistent(env, &invoice_key);
+        }
+        Ok(())
+    }
+
+    fn reconcile_debtor(env: &Env, debtor_hash: &Bytes) -> Result<(), KoraError> {
+        let ids_key = DataKey::DebtorInvoiceIds(debtor_hash.clone());
+        let ids: Vec<u64> = env.storage().persistent()
+            .get(&ids_key).unwrap_or_else(|| Vec::new(env));
+        if ids.is_empty() { return Ok(()); }
+        let config = Self::load_config(env)?;
+        let nft = kora_invoice_nft::InvoiceNftContractClient::new(env, &config.invoice_nft);
+        let mut live = Vec::new(env);
+        let total_key = DataKey::DebtorExposure(debtor_hash.clone());
+        let mut total = Self::debtor_exposure(env, debtor_hash);
+        for id in ids.iter() {
+            let terminal = match nft.try_get_invoice(&id) {
+                Ok(Ok(invoice)) => invoice.debtor_hash == *debtor_hash
+                    && matches!(invoice.status, InvoiceStatus::Repaid | InvoiceStatus::Defaulted),
+                _ => false,
+            };
+            if terminal {
+                let key = DataKey::InvoiceDebtorExposure(id);
+                let recorded: i128 = env.storage().persistent().get(&key).unwrap_or(0);
+                total = total.saturating_sub(recorded);
+                env.storage().persistent().remove(&key);
+            } else {
+                live.push_back(id);
+            }
+        }
+        env.storage().persistent().set(&total_key, &total);
+        Self::bump_persistent(env, &total_key);
+        env.storage().persistent().set(&ids_key, &live);
+        Self::bump_persistent(env, &ids_key);
         Ok(())
     }
 
