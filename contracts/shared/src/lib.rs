@@ -24,6 +24,7 @@
 pub mod audit;
 pub mod errors;
 pub mod events;
+pub mod migration;
 pub mod reentrancy;
 pub mod timelock;
 pub mod types;

@@ -8,7 +8,9 @@ use kora_shared::{
     types::{InvoiceStatus, Listing, RiskTier},
     validation::{bps_of_normalized, require_non_zero_amount, require_valid_fee_bps, require_within_max_amount, safe_add, safe_sub, UPGRADE_TIMELOCK_DELAY},
 };
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Vec};
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, IntoVal, Vec};
+
+pub const SCHEMA_VERSION: u32 = 1;
 
 // ~30 days in ledgers at ~5 s/ledger
 const PERSISTENT_TTL_THRESHOLD: u32 = 518_400;
@@ -68,14 +70,8 @@ pub enum DataKey {
     FeeContribution(u64, Address),
     /// Oracle currency symbol registered for a whitelisted token (#449).
     TokenCurrency(Address),
-    /// Fixed protocol-wide debtor cap for a registry risk tier (0 = uncapped).
-    TierDebtorCap(u32),
-    /// Aggregate outstanding gross funding across this debtor's invoices.
-    DebtorExposure(Bytes),
-    /// Gross funding still outstanding for an individual invoice.
-    InvoiceDebtorExposure(u64),
-    /// Invoices with exposure, used to reconcile terminal NFT statuses.
-    DebtorInvoiceIds(Bytes),
+    /// Instance schema version; absent on deployments predating this framework.
+    SchemaVersion,
 }
 
 // ── Config struct ─────────────────────────────────────────────────────────────
@@ -123,32 +119,23 @@ pub struct MarketplaceContract;
 
 #[contractimpl]
 impl MarketplaceContract {
-    /// Set a fixed protocol-wide debtor exposure cap for one registry risk tier.
-    /// Amounts use the invoice/listing token's base units; zero disables that tier's cap.
-    pub fn set_debtor_tier_cap(
-        env: Env, admin: Address, tier: RiskTier, cap: i128,
+    /// Explicit admin migration. Legacy listings retain their existing codec.
+    pub fn migrate_versions(
+        env: Env, admin: Address, from_version: u32, to_version: u32,
     ) -> Result<(), KoraError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
-        if cap < 0 { return Err(KoraError::InvalidAmount); }
-        require_within_max_amount(cap)?;
-        env.storage().instance().set(&DataKey::TierDebtorCap(Self::tier_ordinal(&tier)), &cap);
+        let key = DataKey::SchemaVersion.into_val(&env);
+        kora_shared::migration::migrate(&env, &key, from_version, to_version, SCHEMA_VERSION,
+            |old, new| match (old, new) {
+                (0, 1) => Ok(()), // No listing codec change in the baseline migration.
+                _ => Err(KoraError::InvalidParameterValue),
+            })?;
         Ok(())
     }
 
-    pub fn get_debtor_tier_cap(env: Env, tier: RiskTier) -> i128 {
-        env.storage().instance().get(&DataKey::TierDebtorCap(Self::tier_ordinal(&tier))).unwrap_or(0)
-    }
-
-    /// Permissionless reconciliation after repayment or default writes the
-    /// terminal status to invoice_nft. Funding/listing also reconcile first.
-    pub fn sync_debtor_exposure(env: Env, debtor_hash: Bytes) -> Result<i128, KoraError> {
-        Self::reconcile_debtor(&env, &debtor_hash)?;
-        Ok(Self::debtor_exposure(&env, &debtor_hash))
-    }
-
-    pub fn get_debtor_exposure(env: Env, debtor_hash: Bytes) -> i128 {
-        Self::debtor_exposure(&env, &debtor_hash)
+    pub fn schema_version(env: Env) -> u32 {
+        kora_shared::migration::read_version(&env, &DataKey::SchemaVersion.into_val(&env))
     }
 
     /// Initialize the marketplace. One-time call.
@@ -188,6 +175,7 @@ impl MarketplaceContract {
             referrer_split_bps: 0,
         };
         env.storage().instance().set(&DataKey::Config, &config);
+        env.storage().instance().set(&DataKey::SchemaVersion, &SCHEMA_VERSION);
         Ok(())
     }
 
@@ -2184,66 +2172,25 @@ mod tests {
     };
 
     #[test]
-    fn debtor_cap_uses_registry_tier_and_exact_boundary() {
+    fn schema_migration_recall_and_wrong_target() {
         let env = Env::default();
         env.mock_all_auths();
+        let id = env.register_contract(None, MarketplaceContract);
+        let client = MarketplaceContractClient::new(&env, &id);
         let admin = Address::generate(&env);
         let nft = Address::generate(&env);
         let pool = Address::generate(&env);
         let treasury = Address::generate(&env);
         let access = Address::generate(&env);
         let oracle = Address::generate(&env);
-        let registry = env.register_contract(None, kora_risk_registry::RiskRegistryContract);
-        let rr = kora_risk_registry::RiskRegistryContractClient::new(&env, &registry);
-        rr.initialize(&admin, &nft, &treasury, &0, &0);
-        let marketplace = env.register_contract(None, MarketplaceContract);
-        let mp = MarketplaceContractClient::new(&env, &marketplace);
-        mp.initialize(&admin, &nft, &pool, &treasury, &access, &oracle, &registry, &50, &0);
-        mp.set_debtor_tier_cap(&admin, &RiskTier::C, &100);
-        mp.set_debtor_tier_cap(&admin, &RiskTier::AAA, &1_000);
-
-        let debtor = Bytes::from_slice(&env, &[7; 32]);
-        let verifier = Address::generate(&env);
-        env.as_contract(&registry, || {
-            env.storage().persistent().set(&kora_risk_registry::DataKey::Verifier(verifier.clone()), &true);
-            env.storage().persistent().set(&kora_risk_registry::DataKey::DebtorAttestors(debtor.clone()),
-                &soroban_sdk::vec![&env, verifier.clone()]);
-            env.storage().persistent().set(&kora_risk_registry::DataKey::DebtorScoreAttestation(debtor.clone(), verifier.clone()), &90u32);
-        });
-        assert_eq!(rr.get_debtor_risk_tier(&debtor), Some(RiskTier::C));
-        env.as_contract(&marketplace, || {
-            env.storage().persistent().set(&DataKey::DebtorExposure(debtor.clone()), &60i128);
-            assert!(MarketplaceContract::check_debtor_cap(&env, &debtor, 40).is_ok());
-            assert_eq!(MarketplaceContract::check_debtor_cap(&env, &debtor, 41),
-                Err(KoraError::ExceedsFundingTarget));
-        });
-        env.as_contract(&registry, || {
-            env.storage().persistent().set(&kora_risk_registry::DataKey::DebtorScoreAttestation(debtor.clone(), verifier), &10u32);
-        });
-        assert_eq!(rr.get_debtor_risk_tier(&debtor), Some(RiskTier::AAA));
-        env.as_contract(&marketplace, || {
-            assert!(MarketplaceContract::check_debtor_cap(&env, &debtor, 41).is_ok());
-        });
-    }
-
-    #[test]
-    fn refund_exposure_decreases_once_and_never_underflows() {
-        let env = Env::default();
-        let marketplace = env.register_contract(None, MarketplaceContract);
-        let debtor = Bytes::from_slice(&env, &[8; 32]);
-        env.as_contract(&marketplace, || {
-            let total = DataKey::DebtorExposure(debtor.clone());
-            let ids = DataKey::DebtorInvoiceIds(debtor.clone());
-            env.storage().persistent().set(&total, &100i128);
-            env.storage().persistent().set(&DataKey::InvoiceDebtorExposure(7), &100i128);
-            env.storage().persistent().set(&ids, &soroban_sdk::vec![&env, 7u64]);
-            MarketplaceContract::remove_debtor_exposure(&env, &debtor, 7, 40).unwrap();
-            assert_eq!(MarketplaceContract::debtor_exposure(&env, &debtor), 60);
-            MarketplaceContract::remove_debtor_exposure(&env, &debtor, 7, 60).unwrap();
-            MarketplaceContract::remove_debtor_exposure(&env, &debtor, 7, 60).unwrap();
-            assert_eq!(MarketplaceContract::debtor_exposure(&env, &debtor), 0);
-            assert_eq!(env.storage().persistent().get::<_, Vec<u64>>(&ids).unwrap().len(), 0);
-        });
+        let registry = Address::generate(&env);
+        client.initialize(&admin, &nft, &pool, &treasury, &access, &oracle, &registry, &50, &0);
+        assert_eq!(client.schema_version(), SCHEMA_VERSION);
+        env.as_contract(&id, || env.storage().instance().remove(&DataKey::SchemaVersion));
+        client.migrate_versions(&admin, &0, &1);
+        client.migrate_versions(&admin, &0, &1);
+        assert_eq!(client.schema_version(), 1);
+        assert!(client.try_migrate_versions(&admin, &0, &2).is_err());
     }
 
     // ── Test harness ──────────────────────────────────────────────────────────

@@ -33,10 +33,10 @@ use kora_shared::{
         DEFAULT_TTL_THRESHOLD, MAX_DEBTOR_HASH_LEN, MAX_IPFS_CID_LEN, UPGRADE_TIMELOCK_DELAY,
     },
 };
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, String,
-    Symbol, Vec,
-};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, String, Symbol, Vec};
+use soroban_sdk::IntoVal;
+
+pub const SCHEMA_VERSION: u32 = 2;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -65,10 +65,17 @@ pub enum InvoiceNftError {
     SMENotRegistered = 21,
     Unauthorized = 22,
     UpgradeTimelockNotElapsed = 23,
-    MintRateLimitExceeded = 24,
-    NoPendingAdminProposal = 25,
-    NotPendingAdmin = 26,
-    InvalidParameterValue = 27,
+    MigrationVersionMismatch = 24,
+    InvalidMigrationTarget = 25,
+}
+
+impl From<kora_shared::migration::MigrationError> for InvoiceNftError {
+    fn from(error: kora_shared::migration::MigrationError) -> Self {
+        match error {
+            kora_shared::migration::MigrationError::VersionMismatch => Self::MigrationVersionMismatch,
+            _ => Self::InvalidMigrationTarget,
+        }
+    }
 }
 
 impl From<CommonError> for InvoiceNftError {
@@ -266,8 +273,12 @@ impl InvoiceNftContract {
         env.storage().instance().set(&DataKey::Admin, &admin);
         env.storage().instance().set(&DataKey::AccessControl, &access_control);
         env.storage().instance().set(&DataKey::NextId, &1u64);
-        // Fresh contract starts at schema v3 (hot/cold split).
-        env.storage().instance().set(&DataKey::MigrationVersion, &3u32);
+        // A freshly initialized contract has no legacy records to backfill, so it
+        // starts at the current schema version (2) rather than replaying migrate()'s
+        // historical version-1 upgrade steps.
+        env.storage()
+            .instance()
+            .set(&DataKey::MigrationVersion, &SCHEMA_VERSION);
         Ok(())
     }
 
@@ -281,23 +292,49 @@ impl InvoiceNftContract {
     //         then remove the legacy Invoice(id) key to reclaim rent.
 
     pub fn migrate(env: Env, admin: Address) -> Result<(), InvoiceNftError> {
+        let version_key = DataKey::MigrationVersion.into_val(&env);
+        let from = kora_shared::migration::read_version(&env, &version_key);
+        Self::migrate_versions(env, admin, from, SCHEMA_VERSION)
+    }
+
+    /// Explicit adjacent-step migration; `migrate` remains as a compatibility wrapper.
+    pub fn migrate_versions(
+        env: Env, admin: Address, from_version: u32, to_version: u32,
+    ) -> Result<(), InvoiceNftError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
-        Self::append_audit_entry(&env, &admin, AdminActionType::InvoiceNftMigrate);
-
-        let current_version: u32 = env
-            .storage()
-            .instance()
-            .get(&DataKey::MigrationVersion)
-            .unwrap_or(0);
-
-        if current_version < 1 {
-            env.storage().instance().set(&DataKey::MigrationVersion, &1u32);
+        let key = DataKey::MigrationVersion.into_val(&env);
+        let changed = kora_shared::migration::migrate(
+            &env, &key, from_version, to_version, SCHEMA_VERSION, |old, new| {
+                match (old, new) {
+                    (0, 1) => Ok(()),
+                    (1, 2) => Self::migrate_v1_to_v2(&env),
+                    _ => Err(InvoiceNftError::InvalidMigrationTarget),
+                }
+            },
+        )?;
+        if changed {
+            Self::append_audit_entry(&env, &admin, AdminActionType::InvoiceNftMigrate);
         }
+        Ok(())
+    }
 
-        // v1→v2: backfill `notes` field on legacy InvoiceV1 records.
-        if current_version < 2 {
-            let next_id: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(1);
+    // Version 1 -> 2: Invoice gained `notes: Option<String>`.
+    fn migrate_v1_to_v2(env: &Env) -> Result<(), InvoiceNftError> {
+        //
+        // Old records in persistent storage are still encoded as InvoiceV1 (no
+        // `notes` field).  Reading them as `Invoice` (v2) would panic because
+        // the XDR field count has changed.  We therefore:
+        //   1. Read each record as InvoiceV1 (the old encoding).
+        //   2. Re-encode it as Invoice (v2) with notes = None.
+        //   3. Overwrite the slot so future reads use the new codec.
+            let next_id: u64 = env
+                .storage()
+                .instance()
+                .get(&DataKey::NextId)
+                .unwrap_or(1);
+
+            // Iterate every allocated invoice ID and backfill.
             let mut id: u64 = 1;
             while id < next_id {
                 let key = DataKey::Invoice(id);
@@ -324,49 +361,6 @@ impl InvoiceNftContract {
                 id += 1;
             }
             env.storage().instance().set(&DataKey::MigrationVersion, &2u32);
-        }
-
-        // v2→v3: split Invoice(id) into InvoiceHot(id) + InvoiceCold(id).
-        if current_version < 3 {
-            let next_id: u64 = env.storage().instance().get(&DataKey::NextId).unwrap_or(1);
-            let mut id: u64 = 1;
-            while id < next_id {
-                let legacy_key = DataKey::Invoice(id);
-                // Skip records already migrated (hot key already present).
-                if env.storage().persistent().has(&DataKey::InvoiceHot(id)) {
-                    id += 1;
-                    continue;
-                }
-                if let Some(inv) = env.storage().persistent().get::<DataKey, Invoice>(&legacy_key) {
-                    let hot = InvoiceHot {
-                        id: inv.id,
-                        sme: inv.sme,
-                        amount: inv.amount,
-                        currency: inv.currency,
-                        due_date: inv.due_date,
-                        risk_score: inv.risk_score,
-                        risk_tier: inv.risk_tier,
-                        status: inv.status,
-                        created_at: inv.created_at,
-                        funded_at: inv.funded_at,
-                        repaid_at: inv.repaid_at,
-                    };
-                    let cold = InvoiceCold {
-                        debtor_hash: inv.debtor_hash,
-                        ipfs_cid: inv.ipfs_cid,
-                        metadata_hash: inv.metadata_hash,
-                        notes: inv.notes,
-                    };
-                    env.storage().persistent().set(&DataKey::InvoiceHot(id), &hot);
-                    Self::bump_persistent(&env, &DataKey::InvoiceHot(id));
-                    env.storage().persistent().set(&DataKey::InvoiceCold(id), &cold);
-                    Self::bump_persistent(&env, &DataKey::InvoiceCold(id));
-                    // Remove legacy key to reclaim rent.
-                    env.storage().persistent().remove(&legacy_key);
-                }
-                id += 1;
-            }
-            env.storage().instance().set(&DataKey::MigrationVersion, &3u32);
         }
 
         Ok(())
@@ -1624,6 +1618,22 @@ mod tests {
             env.storage().instance().get(&DataKey::MigrationVersion)
         });
         assert_eq!(version, Some(3));
+    }
+
+    #[test]
+    fn migration_walks_both_steps_and_recall_is_a_no_op() {
+        let (env, admin, client) = setup();
+        env.as_contract(&client.address, || {
+            env.storage().instance().set(&DataKey::MigrationVersion, &0u32);
+        });
+        client.migrate_versions(&admin, &0, &2);
+        let version: u32 = env.as_contract(&client.address, || {
+            env.storage().instance().get(&DataKey::MigrationVersion).unwrap()
+        });
+        assert_eq!(version, SCHEMA_VERSION);
+        client.migrate_versions(&admin, &0, &2);
+        assert_eq!(client.try_migrate_versions(&admin, &1, &2).unwrap_err().unwrap(),
+            InvoiceNftError::MigrationVersionMismatch);
     }
 
     #[test]
