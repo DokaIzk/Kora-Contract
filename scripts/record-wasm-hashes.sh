@@ -196,9 +196,20 @@ INSTRUCTIONS
 
 # ── Next steps ───────────────────────────────────────────────────────────────
 
+# ── Update WASM metrics baseline ──────────────────────────────────────────────
+
+echo "Updating WASM metrics baseline..."
+if cargo run -p kora-xtask --bin wasm-metrics -- measure-wasm \
+    --out "$ROOT_DIR/baselines/wasm-metrics.json" 2>/dev/null; then
+  echo "  ✓ baselines/wasm-metrics.json updated"
+else
+  echo "  WARNING: could not update metrics baseline (xtask build failed — skipping)"
+fi
+
+echo ""
 echo "Next steps:"
-echo "  1. Verify CHANGELOG.md and ensure [Unreleased] → [$VERSION]"
-echo "  2. Commit: git add $HASHES_FILE && git commit -m 'chore: record WASM hashes for $VERSION'"
+echo "  1. Review CHANGELOG.md and ensure [Unreleased] → [$VERSION]"
+echo "  2. Commit: git add $HASHES_FILE baselines/wasm-metrics.json && git commit -m 'chore: record WASM hashes and metrics baseline for $VERSION'"
 echo "  3. Tag:    git tag -a $VERSION -m 'Release $VERSION'"
 echo "  4. Push:   git push origin $VERSION"
 echo "  5. The release.yml workflow will perform a second independent build and"
