@@ -93,8 +93,6 @@ pub enum KoraError {
     AlreadyVoted = 113,
     GovernanceThresholdNotMet = 114,
     GovernanceTimelockNotElapsed = 115,
-    InvalidParameterValue = 116,
-
     // Cooldown between debtor risk score updates
     ScoreUpdateCooldownNotElapsed = 117,
 
@@ -116,7 +114,6 @@ pub enum KoraError {
     ListingAlreadyFunded = 125,
 
     // access_control / marketplace multisig admin-action governance
-    AlreadyVoted = 113,
     AlreadyApproved = 126,
     ProposalNotFound = 140,
     ProposalAlreadyExecuted = 141,
@@ -127,7 +124,6 @@ pub enum KoraError {
     MultisigApprovalRequired = 146,
     QuorumRequired = 147,
     UnauthorizedCaller = 148,
-    InvalidParameterValue = 149,
 
     // marketplace dependency-migration and token-whitelist timelocks (#443-#446)
     DependencyUpdateTimelockNotElapsed = 150,

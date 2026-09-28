@@ -11,7 +11,7 @@ members = [
     "contracts/price_oracle",
     "contracts/tranche",
     "contracts/dispute_resolution",
-    "contracts/dispute_escrow",
+    "contracts/fractionalizer",
     "contracts/tests",
     "contracts/xtask",
     "contracts/fuzz",

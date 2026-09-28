@@ -729,6 +729,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kora-fractionalizer"
+version = "0.1.0"
+dependencies = [
+ "kora-access-control",
+ "kora-dispute-resolution",
+ "kora-financing-pool",
+ "kora-invoice-nft",
+ "kora-price-oracle",
+ "kora-risk-registry",
+ "kora-shared",
+ "kora-treasury",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "kora-fuzz"
 version = "0.1.0"
 dependencies = [

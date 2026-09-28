@@ -1084,7 +1084,6 @@ pub fn position_share_created(
 ) {
     emit(
         env,
-        symbol_short!("POS_SHR_CR"),
         symbol_short!("SHARE_CRT"),
         (
             invoice_id,
@@ -1108,7 +1107,6 @@ pub fn position_share_transferred(
 ) {
     emit(
         env,
-        symbol_short!("POS_SHR_TR"),
         symbol_short!("SHARE_TRF"),
         (
             invoice_id,
@@ -1130,7 +1128,7 @@ pub fn share_listed_for_sale(
 ) {
     emit(
         env,
-        symbol_short!("SHARE_SALE"),
+        symbol_short!("SHR_SALE"),
         (
             invoice_id,
             share_index,
@@ -1150,7 +1148,7 @@ pub fn share_sold(
 ) {
     emit(
         env,
-        symbol_short!("SHARE_SOLD"),
+        symbol_short!("SHR_SOLD"),
         (
             invoice_id,
             share_index,
