@@ -111,6 +111,8 @@ paths. At a minimum, tests must cover:
 
 ## Operational Checklist
 
+### Standard Upgrade Procedure
+
 1. Propose the upgrade and record the returned `id`.
 2. Announce the proposal and the intended execution time to the community.
 3. Wait for the configured delay to elapse.

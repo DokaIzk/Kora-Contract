@@ -13,7 +13,6 @@
   },
   "dependencies": {
     "better-sqlite3": "9.4.3",
-    "dotenv": "16.4.5",
     "pdfkit": "0.15.0",
     "pino": "9.1.0",
     "pino-pretty": "11.0.0",

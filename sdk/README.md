@@ -67,6 +67,41 @@ const collected = await kora.treasury.getCollected(USDC);
 console.log("Treasury collected fees:", collected);
 ```
 
+## Recovering an interrupted transaction
+
+If the RPC connection drops after submission, a write can reject with
+`TransactionOutcomeUnknownError`. Its `hash` identifies the transaction; the
+error does not imply that the transaction failed. Reconcile after connectivity
+returns instead of resubmitting:
+
+```ts
+import { TransactionOutcomeUnknownError } from "@kora-protocol/sdk";
+
+try {
+  await kora.marketplace.fundInvoice(investor, invoiceId, amount);
+} catch (error) {
+  if (!(error instanceof TransactionOutcomeUnknownError)) throw error;
+
+  const status = await kora.reconcileTransaction(error.hash);
+  if (status.status === "success") {
+    // The ledger confirms the transaction; refresh affected contract state.
+  } else if (status.status === "failed") {
+    // The ledger confirms failure; the user may choose whether to retry.
+  } else {
+    // NOT_FOUND is inconclusive. Keep the transaction unresolved and check again.
+  }
+}
+```
+
+`KoraClient.reconcileTransaction` queries Soroban RPC transaction status. A
+successful or failed result is authoritative; `not_found` and RPC errors are
+not evidence of failure. Applications should retain the hash and unresolved
+transaction state across wallet/network reconnection, retry reconciliation
+when RPC access returns, and only offer a new submission after a confirmed
+failure or an explicit user decision. Wallet connection state is owned by the
+integrating application; this SDK API provides the on-chain status needed to
+recover its transaction tracker.
+
 ## Contract clients
 
 | Client | Contract |

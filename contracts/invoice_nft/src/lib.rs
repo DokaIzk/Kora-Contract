@@ -593,6 +593,11 @@ impl InvoiceNftContract {
         );
         env.storage().persistent().set(&DataKey::OutstandingExposure(sme.clone()), &new_exposure);
         Self::append_sme_invoice_id(&env, &sme, id);
+        let first_key = DataKey::FirstMint(sme.clone());
+        if !env.storage().persistent().has(&first_key) {
+            env.storage().persistent().set(&first_key, &id);
+            Self::bump_persistent(&env, &first_key);
+        }
 
         events::invoice_created(&env, id, &sme, amount, currency);
         Ok(id)
@@ -679,6 +684,13 @@ impl InvoiceNftContract {
             env.storage().persistent().set(&DataKey::OutstandingExposure(sme.clone()), &new_exposure);
         }
         Self::append_sme_invoice_ids(&env, &sme, &ids);
+        if !ids.is_empty() {
+            let first_key = DataKey::FirstMint(sme.clone());
+            if !env.storage().persistent().has(&first_key) {
+                env.storage().persistent().set(&first_key, &ids.get(0).unwrap());
+                Self::bump_persistent(&env, &first_key);
+            }
+        }
 
         let batch_id: u64 = env.storage().instance().get(&DataKey::NextBatchId).unwrap_or(1);
         env.storage().instance().set(
