@@ -108,5 +108,55 @@ console.log('\nRunning Transaction Simulation Tests (#785)...');
   assert.strictEqual(check.willBreach, true, 'Prospective contribution should be flagged as breaching cap');
   console.log('✓ Investor Diversification Insights Tests passed.');
 
+  // 6. SME Invoice Submission Wizard Test Suite (#772)
+  console.log('\nRunning SME Invoice Submission Wizard Tests (#772)...');
+  const { InvoiceWizardService } = require('../dist/services/invoiceWizardService');
+  const invalidDetails = {
+    debtorName: '',
+    debtorHash: 'short',
+    amount: 0n,
+    currency: 'USDC',
+    dueDateTimestamp: Math.floor(Date.now() / 1000) - 1000,
+    description: '',
+  };
+  const wizardErrs = InvoiceWizardService.validateInvoiceDetails(invalidDetails);
+  assert(wizardErrs.length >= 4, 'Wizard validation should reject invalid fields');
+  console.log('✓ SME Invoice Submission Wizard Tests passed.');
+
+  // 7. Investor Portfolio Dashboard Test Suite (#775)
+  console.log('\nRunning Investor Portfolio Dashboard Tests (#775)...');
+  const { PortfolioService } = require('../dist/services/portfolioService');
+  const samplePortfolio = [
+    {
+      id: 'P1', poolId: 'A', invoiceId: 'I1', debtorName: 'Debtor 1', debtorHash: '0x1',
+      riskTier: 'AAA', currency: 'USDC', investedAmount: 1000000n, currentValue: 1050000n,
+      realizedYield: 0n, unrealizedYield: 50000n, fundingTimestamp: 100, maturityTimestamp: 200, status: 'Active',
+    }
+  ];
+  const pMetrics = PortfolioService.computePortfolioMetrics(samplePortfolio);
+  assert.strictEqual(pMetrics.activePositionsCount, 1, 'Active positions count should be 1');
+  console.log('✓ Investor Portfolio Dashboard Tests passed.');
+
+  // 8. Real-Time Transaction Status Tracker Test Suite (#776)
+  console.log('\nRunning Real-Time Transaction Status Tracker Tests (#776)...');
+  const { TxTrackerService } = require('../dist/services/txTrackerService');
+  let txState = TxTrackerService.createInitialState();
+  txState = TxTrackerService.transitionToPending(txState, '0xhash123');
+  txState = TxTrackerService.transitionToConfirmed(txState, 999);
+  assert.strictEqual(txState.state, 'confirmed', 'Tx state should be confirmed');
+  console.log('✓ Real-Time Transaction Status Tracker Tests passed.');
+
+  // 9. SME Repayment Management Dashboard Test Suite (#778)
+  console.log('\nRunning SME Repayment Management Dashboard Tests (#778)...');
+  const { RepaymentService } = require('../dist/services/repaymentService');
+  const mockInv = {
+    invoiceId: 'INV-1', debtorName: 'Acme', principalOwed: 1000000n, currency: 'USDC',
+    dueDateTimestamp: Math.floor(Date.now() / 1000) + 86400, gracePeriodEndTimestamp: Math.floor(Date.now() / 1000) + 7 * 86400,
+    dailyLateFeeBps: 50, repaidAmount: 0n,
+  };
+  const rDetails = RepaymentService.calculateRepaymentDetails(mockInv);
+  assert.strictEqual(rDetails.status, 'Current', 'Invoice due tomorrow should have status Current');
+  console.log('✓ SME Repayment Management Dashboard Tests passed.');
+
   console.log('\n=== All @kora/web Tests Completed Successfully! (100% Coverage) ===');
 })();
