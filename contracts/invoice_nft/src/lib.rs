@@ -64,6 +64,8 @@ pub enum InvoiceNftError {
     SMENotRegistered = 21,
     Unauthorized = 22,
     UpgradeTimelockNotElapsed = 23,
+    InvalidReferrer = 24,
+    ReferralAlreadyLocked = 25,
 }
 
 impl From<CommonError> for InvoiceNftError {
@@ -165,6 +167,10 @@ pub enum DataKey {
     MintRateLimit,
     /// Persistent: `(window_start_ts, mints_used)` rolling mint window for an SME.
     SmeMintWindow(Address),
+    /// First minted invoice, retained even if the invoice is withdrawn.
+    FirstMint(Address),
+    /// Immutable referral attribution for an SME's first mint.
+    SmeReferrer(Address),
 }
 
 /// A dispute raised against an invoice's committed `metadata_hash`.
@@ -257,6 +263,58 @@ pub struct InvoiceNftContract;
 
 #[contractimpl]
 impl InvoiceNftContract {
+    /// Mint the first invoice with optional immutable referral attribution.
+    /// Existing callers can continue using `mint_invoice` without a referral.
+    pub fn mint_invoice_with_referrer(
+        env: Env, sme: Address, debtor_hash: Bytes, amount: i128,
+        currency: Symbol, due_date: u64, ipfs_cid: String,
+        risk_score: u32, notes: Option<String>, referrer: Option<Address>,
+    ) -> Result<u64, InvoiceNftError> {
+        if let Some(ref address) = referrer {
+            let prior: Vec<u64> = env.storage().persistent()
+                .get(&DataKey::SmeInvoiceIds(sme.clone()))
+                .unwrap_or_else(|| Vec::new(&env));
+            if env.storage().persistent().has(&DataKey::FirstMint(sme.clone())) || !prior.is_empty() {
+                return Err(InvoiceNftError::ReferralAlreadyLocked);
+            }
+            if address == &sme || address == &env.current_contract_address() {
+                return Err(InvoiceNftError::InvalidReferrer);
+            }
+            // Follow existing referral edges so a new edge cannot close a cycle.
+            // The bound also rejects chains too deep to validate within a call.
+            let mut cursor = address.clone();
+            for _ in 0..32 {
+                if cursor == sme { return Err(InvoiceNftError::InvalidReferrer); }
+                match env.storage().persistent().get::<_, Address>(&DataKey::SmeReferrer(cursor.clone())) {
+                    Some(next) => cursor = next,
+                    None => break,
+                }
+                if cursor == sme { return Err(InvoiceNftError::InvalidReferrer); }
+            }
+            if env.storage().persistent().has(&DataKey::SmeReferrer(cursor)) {
+                return Err(InvoiceNftError::InvalidReferrer);
+            }
+        }
+        let id = Self::mint_invoice(env.clone(), sme.clone(), debtor_hash, amount,
+            currency, due_date, ipfs_cid, risk_score, notes)?;
+        if let Some(address) = referrer {
+            let key = DataKey::SmeReferrer(sme);
+            env.storage().persistent().set(&key, &address);
+            Self::bump_persistent(&env, &key);
+        }
+        Ok(id)
+    }
+
+    /// Attribution for a first mint, if any.
+    pub fn get_sme_referrer(env: Env, sme: Address) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::SmeReferrer(sme))
+    }
+
+    /// Original first minted invoice; withdrawals cannot reset eligibility.
+    pub fn get_first_mint(env: Env, sme: Address) -> Option<u64> {
+        env.storage().persistent().get(&DataKey::FirstMint(sme))
+    }
+
     /// One-time initializer. Sets admin and access-control contract address.
     ///
     /// **Parameters:**
@@ -618,6 +676,11 @@ impl InvoiceNftContract {
             .persistent()
             .set(&DataKey::OutstandingExposure(sme.clone()), &new_exposure);
         Self::append_sme_invoice_id(&env, &sme, id);
+        let first_key = DataKey::FirstMint(sme.clone());
+        if !env.storage().persistent().has(&first_key) {
+            env.storage().persistent().set(&first_key, &id);
+            Self::bump_persistent(&env, &first_key);
+        }
 
         events::invoice_created(&env, id, &sme, invoice.amount, invoice.currency.clone());
         Ok(id)
@@ -710,9 +773,16 @@ impl InvoiceNftContract {
                 .ok_or(InvoiceNftError::ArithmeticOverflow)?;
             env.storage()
                 .persistent()
-                .set(&DataKey::OutstandingExposure(sme), &new_exposure);
+                .set(&DataKey::OutstandingExposure(sme.clone()), &new_exposure);
         }
         Self::append_sme_invoice_ids(&env, &sme, &ids);
+        if !ids.is_empty() {
+            let first_key = DataKey::FirstMint(sme.clone());
+            if !env.storage().persistent().has(&first_key) {
+                env.storage().persistent().set(&first_key, &ids.get(0).unwrap());
+                Self::bump_persistent(&env, &first_key);
+            }
+        }
 
         let batch_id: u64 = env.storage().instance().get(&DataKey::NextBatchId).unwrap_or(1);
         env.storage().instance().set(
