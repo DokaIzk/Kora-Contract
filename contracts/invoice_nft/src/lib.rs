@@ -1806,6 +1806,36 @@ impl InvoiceNftContract {
         Ok(())
     }
 
+    /// Cancel a pending upgrade proposal before it is executed.
+    ///
+    /// **Parameters:**
+    /// - `admin` — Must be the current admin address.
+    /// - `proposal_id` — The id of the proposal to cancel (currently always 0 in simple implementation).
+    ///
+    /// **Errors:**
+    /// - `InvoiceNftError::NotAdmin` — Caller is not the admin.
+    /// - `InvoiceNftError::NoUpgradeProposed` — No upgrade proposal is pending.
+    ///
+    /// **Security:** Requires `admin.require_auth()`. Allows cancellation at any time before execution,
+    /// providing a safety mechanism to abort problematic upgrades during the timelock window.
+    pub fn cancel_upgrade(env: Env, admin: Address, _proposal_id: u64) -> Result<(), InvoiceNftError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        
+        // Check if a proposal exists
+        let _: (BytesN<32>, u64) = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeProposal)
+            .ok_or(InvoiceNftError::NoUpgradeProposed)?;
+        
+        // Remove the proposal
+        env.storage().instance().remove(&DataKey::UpgradeProposal);
+        
+        events::upgrade_cancelled(&env, &admin);
+        Ok(())
+    }
+
     // ── Currency Allowlist ────────────────────────────────────────────────────
 
     /// Add a currency symbol to the allowlist. Admin only.
