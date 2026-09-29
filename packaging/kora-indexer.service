@@ -1,0 +1,36 @@
+[Unit]
+Description=Kora Protocol Indexer Service
+Documentation=https://docs.kora.finance/infrastructure
+After=network.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=kora
+Group=kora
+WorkingDirectory=/opt/kora/services/indexer
+Environment="RUST_LOG=info"
+EnvironmentFile=/opt/kora/services/indexer/.env
+ExecStart=/opt/kora/services/indexer/target/release/kora-indexer
+Restart=always
+RestartSec=10
+StandardOutput=append:/var/log/kora/indexer.log
+StandardError=append:/var/log/kora/indexer-error.log
+
+# Security hardening
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=strict
+ProtectHome=true
+ReadWritePaths=/var/log/kora /opt/kora/services/indexer
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+
+# Resource limits
+LimitNOFILE=65536
+MemoryMax=2G
+CPUQuota=200%
+
+[Install]
+WantedBy=multi-user.target
