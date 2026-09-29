@@ -1,7 +1,7 @@
 #![no_std]
 
 use kora_shared::{
-    errors::KoraError,
+    errors::{CommonError, KoraError},
     events,
     types::Dispute,
     validation::{require_valid_ipfs_cid, UPGRADE_TIMELOCK_DELAY},
@@ -30,6 +30,17 @@ pub enum DisputeResolutionError {
     ArithmeticOverflow = 14,
     NotGovernance = 15,
     DisputeNotOpen = 16,
+}
+
+impl From<CommonError> for DisputeResolutionError {
+    fn from(e: CommonError) -> Self {
+        match e {
+            CommonError::InvalidCid => DisputeResolutionError::InvalidCid,
+            CommonError::InvalidAmount => DisputeResolutionError::InvalidAmount,
+            CommonError::ArithmeticOverflow => DisputeResolutionError::ArithmeticOverflow,
+            _ => DisputeResolutionError::InvalidCid,
+        }
+    }
 }
 
 impl From<KoraError> for DisputeResolutionError {
@@ -197,11 +208,6 @@ impl DisputeResolutionContract {
             Some(d) => !d.resolved,
             None => false,
         }
-    }
-
-    /// Try-version of `has_open_dispute` for safe cross-contract calls.
-    pub fn try_has_open_dispute(env: Env, invoice_id: u64) -> Result<bool, DisputeResolutionError> {
-        Ok(Self::has_open_dispute(env, invoice_id))
     }
 
     // ── Upgrade ────────────────────────────────────────────────────────────────

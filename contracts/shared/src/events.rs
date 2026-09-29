@@ -193,6 +193,15 @@ pub fn repayment_made(env: &Env, invoice_id: u64, payer: &Address, amount: i128)
     );
 }
 
+/// Schema: (actor=payer, invoice_id, amount, timestamp)
+pub fn repayment_approved(env: &Env, invoice_id: u64, payer: &Address, amount: i128) {
+    emit(
+        env,
+        symbol_short!("REP_APPR"),
+        (payer.clone(), invoice_id, amount, env.ledger().timestamp()),
+    );
+}
+
 /// Schema: (actor=payer, invoice_id, installment_index, amount, timestamp)
 pub fn installment_paid(env: &Env, invoice_id: u64, payer: &Address, index: u32, amount: i128) {
     emit(
@@ -934,6 +943,25 @@ pub fn metadata_hash_corrected(
     );
 }
 
+/// Schema: (actor=sme, invoice_id, new_cid, timestamp)
+pub fn metadata_cid_updated(
+    env: &Env,
+    invoice_id: u64,
+    sme: &Address,
+    new_cid: &String,
+) {
+    emit(
+        env,
+        symbol_short!("MTD_CID"),
+        (
+            sme.clone(),
+            invoice_id,
+            new_cid.clone(),
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
 // ── Dutch Auction / Decay Schedule Events (#439) ──────────────────────────────
 
 /// Schema: (actor=seller, invoice_id, floor_price, decay_end_ts, timestamp)
@@ -1074,7 +1102,6 @@ pub fn position_share_created(
 ) {
     emit(
         env,
-        symbol_short!("POS_SHR_CR"),
         symbol_short!("SHARE_CRT"),
         (
             invoice_id,
@@ -1098,7 +1125,6 @@ pub fn position_share_transferred(
 ) {
     emit(
         env,
-        symbol_short!("POS_SHR_TR"),
         symbol_short!("SHARE_TRF"),
         (
             invoice_id,
@@ -1120,7 +1146,7 @@ pub fn share_listed_for_sale(
 ) {
     emit(
         env,
-        symbol_short!("SHARE_SALE"),
+        Symbol::new(env, "SHARE_SALE"),
         (
             invoice_id,
             share_index,
@@ -1140,7 +1166,7 @@ pub fn share_sold(
 ) {
     emit(
         env,
-        symbol_short!("SHARE_SOLD"),
+        Symbol::new(env, "SHARE_SOLD"),
         (
             invoice_id,
             share_index,
@@ -1231,3 +1257,140 @@ pub fn dispute_payout(
         (invoice_id, amount, env.ledger().timestamp()),
     );
 }
+
+// ── Treasury Fee Sweep Automation (#742) ────────────────────────────────────
+
+/// Schema: (admin, split_count, timestamp)
+pub fn sweep_splits_configured(
+    env: &Env,
+    admin: &Address,
+    split_count: u32,
+    timestamp: u64,
+) {
+    emit(
+        env,
+        symbol_short!("SWP_CFG"),
+        (admin.clone(), split_count, timestamp),
+    );
+}
+
+/// Schema: (token, destination, amount, timestamp)
+pub fn sweep_executed(
+    env: &Env,
+    token: &Address,
+    destination: &Address,
+    amount: i128,
+    timestamp: u64,
+) {
+    emit(
+        env,
+        symbol_short!("SWP_EXEC"),
+        (token.clone(), destination.clone(), amount, timestamp),
+    );
+}
+
+pub fn tranche_created(
+    env: &Env,
+    id: u64,
+    creator: &Address,
+    total_face_value: i128,
+) {
+    emit(
+        env,
+        symbol_short!("TRN_CRTD"),
+        (id, creator.clone(), total_face_value),
+    );
+}
+
+pub fn tranche_funded(
+    env: &Env,
+    tranche_id: u64,
+    investor: &Address,
+    amount: i128,
+) {
+    emit(
+        env,
+        symbol_short!("TRN_FNDD"),
+        (tranche_id, investor.clone(), amount),
+    );
+}
+
+/// Schema: (actor=admin, token, timestamp)
+pub fn token_whitelist_proposed(env: &Env, actor: &Address, token: &Address) {
+    emit(
+        env,
+        symbol_short!("TOK_WLP"),
+        (actor.clone(), token.clone(), env.ledger().timestamp()),
+    );
+}
+
+/// Schema: (actor=admin, field_tag, new_address, timestamp)
+pub fn dependency_update_proposed(env: &Env, actor: &Address, field_tag: u32, new_address: &Address) {
+    emit(
+        env,
+        symbol_short!("DEP_PROP"),
+        (actor.clone(), field_tag, new_address.clone(), env.ledger().timestamp()),
+    );
+}
+
+/// Schema: (actor=admin, field_tag, old_address, new_address, timestamp)
+pub fn dependency_updated(
+    env: &Env,
+    actor: &Address,
+    field_tag: u32,
+    old_address: &Address,
+    new_address: &Address,
+) {
+    emit(
+        env,
+        symbol_short!("DEP_EXEC"),
+        (
+            actor.clone(),
+            field_tag,
+            old_address.clone(),
+            new_address.clone(),
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Schema: (actor=investor, invoice_id, prospective_amount, cap_bps, timestamp)
+pub fn investor_concentration_exceeded(
+    env: &Env,
+    invoice_id: u64,
+    investor: &Address,
+    prospective: i128,
+    cap_bps: u32,
+) {
+    emit(
+        env,
+        symbol_short!("INV_CONC"),
+        (investor.clone(), invoice_id, prospective, cap_bps, env.ledger().timestamp()),
+    );
+}
+
+/// Schema: (actor=caller, invoice_id, old_asking_price, new_asking_price, old_deadline, new_deadline, timestamp)
+pub fn listing_amended(
+    env: &Env,
+    invoice_id: u64,
+    caller: &Address,
+    old_asking_price: i128,
+    new_asking_price: i128,
+    old_deadline: u64,
+    new_deadline: u64,
+) {
+    emit(
+        env,
+        symbol_short!("LST_AMND"),
+        (
+            caller.clone(),
+            invoice_id,
+            old_asking_price,
+            new_asking_price,
+            old_deadline,
+            new_deadline,
+            env.ledger().timestamp(),
+        ),
+    );
+}
+

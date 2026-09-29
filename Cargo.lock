@@ -705,10 +705,21 @@ dependencies = [
 ]
 
 [[package]]
+name = "kora-dispute-resolution"
+version = "0.1.0"
+dependencies = [
+ "kora-access-control",
+ "kora-shared",
+ "proptest",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "kora-financing-pool"
 version = "0.1.0"
 dependencies = [
  "kora-access-control",
+ "kora-dispute-resolution",
  "kora-invoice-nft",
  "kora-price-oracle",
  "kora-risk-registry",
@@ -731,7 +742,7 @@ dependencies = [
  "kora-risk-registry",
  "kora-shared",
  "kora-treasury",
- "rand 0.8.6",
+ "rand 0.8.5",
  "soroban-sdk",
 ]
 
@@ -753,6 +764,7 @@ dependencies = [
  "kora-access-control",
  "kora-financing-pool",
  "kora-invoice-nft",
+ "kora-price-oracle",
  "kora-risk-registry",
  "kora-shared",
  "kora-treasury",
@@ -772,16 +784,6 @@ name = "kora-risk-registry"
 version = "0.1.0"
 dependencies = [
  "kora-shared",
- "soroban-sdk",
-]
-
-[[package]]
-name = "kora-secondary-market"
-version = "0.1.0"
-dependencies = [
- "kora-financing-pool",
- "kora-shared",
- "proptest",
  "soroban-sdk",
 ]
 
@@ -809,10 +811,20 @@ dependencies = [
 ]
 
 [[package]]
+name = "kora-tranche"
+version = "0.1.0"
+dependencies = [
+ "kora-invoice-nft",
+ "kora-shared",
+ "soroban-sdk",
+]
+
+[[package]]
 name = "kora-treasury"
 version = "0.1.0"
 dependencies = [
  "kora-access-control",
+ "kora-price-oracle",
  "kora-shared",
  "soroban-sdk",
 ]
@@ -824,7 +836,6 @@ dependencies = [
  "serde",
  "serde_json",
  "sha2",
- "walkdir",
 ]
 
 [[package]]
@@ -1186,15 +1197,6 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
-
-[[package]]
-name = "same-file"
-version = "1.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
-dependencies = [
- "winapi-util",
-]
 
 [[package]]
 name = "sec1"
@@ -1681,16 +1683,6 @@ dependencies = [
 ]
 
 [[package]]
-name = "walkdir"
-version = "2.5.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "29790946404f91d9c5d06f9874efddea1dc06c5efe94541a7d6863108e3a5e4b"
-dependencies = [
- "same-file",
- "winapi-util",
-]
-
-[[package]]
 name = "wasi"
 version = "0.11.1+wasi-snapshot-preview1"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -1785,15 +1777,6 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "d5a015fe95f3504a94bb1462c717aae75253e39b9dd6c3fb1062c934535c64aa"
 dependencies = [
  "indexmap-nostd",
-]
-
-[[package]]
-name = "winapi-util"
-version = "0.1.11"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "c2a7b1c03c876122aa43f3020e6c3c3ee5c05081c9a00739faf7503aeba10d22"
-dependencies = [
- "windows-sys",
 ]
 
 [[package]]

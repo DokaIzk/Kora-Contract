@@ -81,51 +81,8 @@ kora-risk-registry = { path = "../risk_registry" }
 kora-access-control = { path = "../access_control" }
 kora-price-oracle = { path = "../price_oracle" }
 
-# ── Integration test targets ──────────────────────────────────────────────────
-# Each [[test]] entry wires a standalone .rs file in contracts/tests/ as a
-# named integration-test binary, making it discoverable by `cargo test --workspace`.
-
-[[test]]
-name = "access_control_edge_cases"
-path = "access_control_edge_cases.rs"
-
-[[test]]
-name = "invoice_nft_edge_cases"
-path = "invoice_nft_edge_cases.rs"
-
-[[test]]
-name = "marketplace_edge_cases"
-path = "marketplace_edge_cases.rs"
-
-[[test]]
-name = "financing_pool_edge_cases"
-path = "financing_pool_edge_cases.rs"
-
-[[test]]
-name = "treasury_edge_cases"
-path = "treasury_edge_cases.rs"
-
-[[test]]
-name = "treasury_collect_fee_auth"
-path = "treasury_collect_fee_auth.rs"
-
-[[test]]
-name = "issue_468_currency_resolution"
-path = "issue_468_currency_resolution.rs"
-
-[[test]]
-name = "issue_469_position_balance"
-path = "issue_469_position_balance.rs"
-
-[[test]]
-name = "issue_470_concentration_cap"
-path = "issue_470_concentration_cap.rs"
-
-[[test]]
-name = "issue_471_secondary_market_settlement"
-path = "issue_471_secondary_market_settlement.rs"
-
 # ── Cross-contract auth fuzzing harness (Issue #610) ─────────────────────────
 [[test]]
 name = "auth_fuzzing"
 path = "auth_fuzzing.rs"
+

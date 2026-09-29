@@ -43,22 +43,16 @@ pub fn require_non_negative_amount(amount: i128) -> Result<(), CommonError> {
 /// # Examples
 /// ```ignore
 /// use kora_shared::validation::require_amount_within_bounds;
-/// assert!(require_amount_within_bounds(50, 100).is_ok());
-/// assert!(require_amount_within_bounds(100, 100).is_ok());
-/// assert!(require_amount_within_bounds(101, 100).is_err());
-/// assert!(require_amount_within_bounds(-1, 100).is_err());
+/// assert!(require_amount_within_bounds(50, 0, 100).is_ok());
+/// assert!(require_amount_within_bounds(100, 0, 100).is_ok());
+/// assert!(require_amount_within_bounds(101, 0, 100).is_err());
+/// assert!(require_amount_within_bounds(-1, 0, 100).is_err());
 /// ```
-pub fn require_amount_within_bounds(amount: i128, min: i128, max: i128) -> Result<(), KoraError> {
-    if amount < min || amount > max {
-        return Err(KoraError::InvalidAmount);
-/// Reject amounts outside [0, max].
 #[inline]
-pub fn require_amount_within_bounds(amount: i128, max: i128) -> Result<(), CommonError> {
-    if amount < 0 || amount > max {
+pub fn require_amount_within_bounds(amount: i128, min: i128, max: i128) -> Result<(), CommonError> {
+    if amount < min || amount > max {
         return Err(CommonError::InvalidAmount);
     }
-    Ok(())
-}
     Ok(())
 }
 
@@ -587,14 +581,14 @@ mod tests {
 
     #[test]
     fn test_require_amount_within_bounds_zero_max() {
-        assert!(require_amount_within_bounds(0, 0).is_ok());
-        assert!(require_amount_within_bounds(1, 0).is_err());
-        assert!(require_amount_within_bounds(-1, 0).is_err());
+        assert!(require_amount_within_bounds(0, 0, 0).is_ok());
+        assert!(require_amount_within_bounds(1, 0, 0).is_err());
+        assert!(require_amount_within_bounds(-1, 0, 0).is_err());
     }
 
     #[test]
     fn test_require_amount_within_bounds_accepts_exact_max() {
-        assert!(require_amount_within_bounds(500, 500).is_ok());
+        assert!(require_amount_within_bounds(500, 0, 500).is_ok());
     }
 
     #[test]

@@ -59,25 +59,32 @@ fn sha256_file(path: &Path) -> String {
     format!("{:x}", result)
 }
 
-fn discover_wasm(contract_name: &str) -> Option<PathBuf> {
-    let contracts_root = Path::new(CONTRACTS_DIR);
-    let pattern = format!("{contract_name}-*/target/soroban-*/release/{contract_name}.wasm");
-    let crate_dir = contracts_root.join(contract_name);
-    if !crate_dir.is_dir() {
-        return None;
-    }
-    for entry in walkdir::WalkDir::new(&crate_dir) {
-        if let Ok(entry) = entry {
+fn find_wasm_recursive(dir: &Path, contract_name: &str) -> Option<PathBuf> {
+    if let Ok(entries) = std::fs::read_dir(dir) {
+        for entry in entries.flatten() {
             let path = entry.path();
-            if path.extension().is_some_and(|e| e == "wasm") {
+            if path.is_dir() {
+                if let Some(found) = find_wasm_recursive(&path, contract_name) {
+                    return Some(found);
+                }
+            } else if path.extension().is_some_and(|e| e == "wasm") {
                 let name = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
                 if name == contract_name || name.contains(&format!("{contract_name}.")) {
-                    return Some(path.to_path_buf());
+                    return Some(path);
                 }
             }
         }
     }
     None
+}
+
+fn discover_wasm(contract_name: &str) -> Option<PathBuf> {
+    let contracts_root = Path::new(CONTRACTS_DIR);
+    let crate_dir = contracts_root.join(contract_name);
+    if !crate_dir.is_dir() {
+        return None;
+    }
+    find_wasm_recursive(&crate_dir, contract_name)
 }
 
 fn load_state() -> State {

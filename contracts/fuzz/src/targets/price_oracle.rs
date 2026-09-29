@@ -18,7 +18,7 @@ pub fn run(data: &[u8]) {
         let env = &p.env;
         match op {
             Op::Initialize { admin } => {
-                let _ = o.try_initialize(&p.actor(admin));
+                let _ = o.try_initialize(&p.actor(admin), &p.access_control.address);
             }
             Op::SetPrice { admin, base, quote, price, ptag } => {
                 let _ = o.try_set_price(

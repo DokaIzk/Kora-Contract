@@ -2,12 +2,12 @@
 
 use kora_access_control::AccessControlContractClient;
 use kora_shared::{
-    audit::{chain_checksum, AdminAuditEntry, AuditEntry, MAX_AUDIT_LOG_SIZE, AuditSource},
-    errors::CommonError,
+    audit::{chain_checksum, AdminActionType, AdminAuditEntry, AuditEntry, AuditSource, MAX_AUDIT_LOG_SIZE},
+    errors::{CommonError, KoraError},
     events,
     reentrancy::ReentrancyGuard,
-    types::{AssetAllocationPolicy, AllocationDrift},
-    validation::{require_non_negative_amount, require_valid_fee_bps, require_within_max_amount, UPGRADE_TIMELOCK_DELAY},
+    types::{AllocationDrift, AssetAllocationPolicy, MultisigConfig},
+    validation::{require_non_negative_amount, require_not_self, require_valid_fee_bps, require_within_max_amount, UPGRADE_TIMELOCK_DELAY},
 };
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, String, Symbol, Vec};
 
@@ -38,6 +38,8 @@ pub enum TreasuryError {
     NoShareAvailable = 17,
     InvalidDistributionConfig = 18,
     DistributionProposalNotFound = 19,
+    SweepSplitsNotConfigured = 20,
+    InvalidSweepSplits = 21,
 }
 
 impl From<CommonError> for TreasuryError {
@@ -50,6 +52,29 @@ impl From<CommonError> for TreasuryError {
             CommonError::Reentrancy => TreasuryError::Reentrancy,
             // Any other CommonError variant reachable via a `?` call in this crate
             // falls back to InvalidAmount rather than being silently dropped.
+            _ => TreasuryError::InvalidAmount,
+        }
+    }
+}
+
+impl From<KoraError> for TreasuryError {
+    fn from(e: KoraError) -> Self {
+        match e {
+            KoraError::NotAdmin => TreasuryError::NotAdmin,
+            KoraError::InvalidAmount => TreasuryError::InvalidAmount,
+            KoraError::InvalidAddress => TreasuryError::InvalidAddress,
+            KoraError::InvalidFeeRate => TreasuryError::InvalidFeeRate,
+            KoraError::ArithmeticOverflow => TreasuryError::ArithmeticOverflow,
+            KoraError::Reentrancy => TreasuryError::Reentrancy,
+            KoraError::NotInitialized => TreasuryError::NotInitialized,
+            KoraError::AlreadyInitialized => TreasuryError::AlreadyInitialized,
+            KoraError::SweepSplitsNotConfigured => TreasuryError::SweepSplitsNotConfigured,
+            KoraError::InvalidSweepSplits => TreasuryError::InvalidSweepSplits,
+            KoraError::InsufficientFunds | KoraError::InsufficientPoolBalance => TreasuryError::InsufficientPoolBalance,
+            KoraError::TokenNotWhitelisted => TreasuryError::TokenNotWhitelisted,
+            KoraError::UpgradeTimelockNotElapsed => TreasuryError::UpgradeTimelockNotElapsed,
+            KoraError::NoUpgradeProposed => TreasuryError::NoUpgradeProposed,
+            KoraError::WithdrawalRateLimitExceeded => TreasuryError::WithdrawalRateLimitExceeded,
             _ => TreasuryError::InvalidAmount,
         }
     }
@@ -79,21 +104,22 @@ pub enum DataKey {
     PendingAdmin,
     /// Protocol fee in basis points — persistent for durability.
     FeeBps,
-    Collected(Address), // accumulated fees per token
-    WithdrawalLock,     // reentrancy guard
-    // Audit log ring buffer
-    AuditEntry(u64),    // slot index 0..MAX_AUDIT_LOG_SIZE-1
-    AuditHead,          // next write slot (u64)
-    AuditTotal,         // total entries ever appended (u64)
-    AuditChecksum,      // rolling sha256 checksum (BytesN<32>)
     /// Accumulated fees per token (informational).
     Collected(Address),
+    /// Reentrancy guard flag (instance-level).
+    WithdrawalLock,
+    /// Audit log entry at ring-buffer position `n`.
+    AuditEntry(u64),
+    /// Next write slot in the audit ring buffer (u64).
+    AuditHead,
+    /// Total entries ever appended (u64).
+    AuditTotal,
+    /// Rolling sha256 checksum (BytesN<32>).
+    AuditChecksum,
     /// Whitelisted token flag.
     WhitelistedToken(Address),
     /// Pending upgrade proposal: (wasm_hash, proposed_at_timestamp).
     UpgradeProposal,
-    /// Reentrancy guard flag (instance-level).
-    WithdrawalLock,
     /// Maximum total withdrawal allowed per EPOCH_DURATION window for a given
     /// token (0 = uncapped). Keyed by token so unrelated tokens' caps don't
     /// share a single global quota (#452).
@@ -109,13 +135,10 @@ pub enum DataKey {
     AccessControl,
     /// Distinct, admin-declared flag gating `emergency_withdraw` (#453).
     EmergencyDeclared,
-    // ── Audit log ─────────────────────────────────────────────────────────────
     /// Next write position in the audit ring buffer (0..MAX_AUDIT_LOG_SIZE).
     AuditLogHead,
     /// Total admin actions ever recorded (monotonic; not capped at ring size).
     AuditLogTotal,
-    /// An audit log entry at ring-buffer position `n`.
-    AuditEntry(u64),
     // ── Recipient allowlist (#457) ───────────────────────────────────────────
     /// Whether `recipient` is a matured, allowed withdrawal destination.
     AllowedRecipient(Address),
@@ -130,8 +153,6 @@ pub enum DataKey {
     /// Portion (bps) of every newly `collect_fee`'d amount routed into the reserve.
     ReserveAllocationBps,
     // ── Multisig quorum gate (#455) ──────────────────────────────────────────
-    /// The `access_control` contract treasury checks for multisig configuration.
-    AccessControl,
     /// Monotonic counter for the next treasury proposal id.
     NextTreasuryProposalId,
     /// A pending treasury multisig proposal, keyed by proposal id.
@@ -139,6 +160,32 @@ pub enum DataKey {
     // ── Asset Allocation Policy (Issue #673) ────────────────────────────────
     /// Governed allocation policy for a given asset (target min/max ranges).
     AssetAllocationPolicy(Address),
+    // ── Marketplace & Price Oracle ──────────────────────────────────────────
+    /// Address of the authorized marketplace contract.
+    Marketplace,
+    /// Address of the price oracle contract.
+    PriceOracle,
+    // ── Revenue-sharing distribution (#667) ─────────────────────────────────
+    /// Current distribution epoch counter.
+    CurrentDistributionEpoch,
+    /// Pending distribution proposal.
+    DistributionProposal,
+    /// Distribution configuration for a given epoch.
+    DistributionConfig(u64),
+    /// Stakeholder claim record: (stakeholder, epoch, token) -> amount.
+    StakeholderClaim(Address, u64, Address),
+    /// Distribution pool balance per token.
+    DistributionPool(Address),
+    // ── Transparency reporting ──────────────────────────────────────────────
+    /// Treasury report for a given epoch.
+    TreasuryReport(u64),
+    /// Last epoch for which a report was generated.
+    LastReportedEpoch,
+    // ── Fee Sweep Automation (#742) ─────────────────────────────────────────
+    /// Configured sweep split destinations: Vec<(Address, u32)> summing to 10000 bps.
+    SweepSplit,
+    /// Primary destination that receives rounding dust from sweep.
+    SweepPrimaryDestination,
 }
 
 /// A highest-risk treasury action gated behind `access_control`'s multisig quorum
@@ -226,31 +273,7 @@ impl TreasuryContract {
             PERSISTENT_BUMP_AMOUNT,
         );
         events::treasury_initialized(&env, &admin, fee_bps);
-        Ok(())
-    }
-
-    /// Set (or update) the `access_control` contract reference used to gate
-    /// `withdraw` behind the protocol-wide pause flag. Admin only.
-    ///
-    /// A post-init setter rather than an `initialize` parameter, so existing
-    /// deployments/tests can opt in without changing `initialize`'s signature.
-    ///
-    /// **Errors:**
-    /// - `KoraError::NotAdmin` — Caller is not the admin.
-    ///
-    /// **Security:** Requires `admin.require_auth()`.
-    pub fn set_access_control(
-        env: Env,
-        admin: Address,
-        access_control: Address,
-    ) -> Result<(), KoraError> {
-        admin.require_auth();
-        Self::require_admin(&env, &admin)?;
-        env.storage()
-            .instance()
-            .set(&DataKey::AccessControl, &access_control);
-        events::access_control_updated(&env, &admin, &access_control);
-        Self::append_audit_entry(&env, &admin, AdminActionType::SetAccessControl);
+        Self::append_audit_entry_internal(&env, &admin, String::from_str(&env, "initialize"));
         Ok(())
     }
 
@@ -269,13 +292,14 @@ impl TreasuryContract {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         Self::require_no_quorum_required(&env)?;
-        Self::do_set_fee_bps(&env, &admin, fee_bps)
+        Self::do_set_fee_bps(&env, &admin, fee_bps)?;
+        Ok(())
     }
 
     fn do_set_fee_bps(env: &Env, admin: &Address, fee_bps: u32) -> Result<(), KoraError> {
         require_valid_fee_bps(fee_bps)?;
         env.storage().instance().set(&DataKey::FeeBps, &fee_bps);
-        Self::append_audit_entry(&env, &admin, String::from_str(&env, "set_fee_bps"));
+        Self::append_audit_entry_internal(env, admin, String::from_str(env, "set_fee_bps"));
 
         let old_bps: u32 = env
             .storage()
@@ -316,7 +340,7 @@ impl TreasuryContract {
             .persistent()
             .set(&DataKey::PriceOracle, &price_oracle);
         Self::bump_persistent(&env, &DataKey::PriceOracle);
-        Self::append_audit_entry(&env, &admin, AdminActionType::SetFeeBps);
+        Self::append_audit_entry(&env, &admin, AdminActionType::SetFeeBps, None, None);
         Ok(())
     }
 
@@ -418,14 +442,14 @@ impl TreasuryContract {
             .get(&DataKey::ReserveAllocationBps)
             .unwrap_or(0);
         if reserve_bps > 0 {
-            let reserve_cut = bps_of(amount, reserve_bps)?;
+            let reserve_cut = Self::bps_of(amount, reserve_bps)?;
             if reserve_cut > 0 {
                 let reserve_key = DataKey::ReserveBalance(token.clone());
                 let current_reserve: i128 =
                     env.storage().persistent().get(&reserve_key).unwrap_or(0);
                 let new_reserve = current_reserve
                     .checked_add(reserve_cut)
-                    .ok_or(KoraError::ArithmeticOverflow)?;
+                    .ok_or(TreasuryError::ArithmeticOverflow)?;
                 env.storage().persistent().set(&reserve_key, &new_reserve);
                 Self::bump_persistent(&env, &reserve_key);
             }
@@ -530,16 +554,27 @@ impl TreasuryContract {
         recipient: Address,
         amount: i128,
     ) -> Result<(), TreasuryError> {
-        // ── Checks ────────────────────────────────────────────────────────────
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
-        Self::require_not_paused(&env)?;
+        Self::require_no_quorum_required(&env)?;
+        Self::do_withdraw(&env, &admin, &token, &recipient, amount)?;
+        Ok(())
+    }
+
+    fn do_withdraw(
+        env: &Env,
+        admin: &Address,
+        token: &Address,
+        recipient: &Address,
+        amount: i128,
+    ) -> Result<(), KoraError> {
+        Self::require_not_paused(env)?;
         if amount <= 0 {
-            return Err(TreasuryError::InvalidAmount);
+            return Err(KoraError::InvalidAmount);
         }
         require_within_max_amount(amount)?;
-        Self::require_whitelisted_token(&env, &token)?;
-        Self::enforce_rate_limit(&env, &token, amount)?;
+        Self::require_whitelisted_token(env, token)?;
+        Self::enforce_rate_limit(env, token, amount)?;
 
         // Acquire reentrancy guard — released automatically when _guard drops
         let _guard = ReentrancyGuard::new(env)?;
@@ -553,9 +588,8 @@ impl TreasuryContract {
             .unwrap_or(0);
         let spendable = balance.saturating_sub(reserved);
 
-        if balance < amount {
-            return Err(KoraError::InsufficientFunds);
-            return Err(TreasuryError::InsufficientPoolBalance);
+        if spendable < amount {
+            return Err(KoraError::InsufficientPoolBalance);
         }
 
         // ── Effects ───────────────────────────────────────────────────────────
@@ -569,7 +603,7 @@ impl TreasuryContract {
             env.storage().persistent().set(&collected_key, &new_collected);
             Self::bump_persistent(env, &collected_key);
         }
-        Self::record_withdrawal(&env, &token, amount);
+        Self::record_withdrawal(env, token, amount);
 
         // ── Interactions ──────────────────────────────────────────────────────
         token_client.transfer(&env.current_contract_address(), recipient, &amount);
@@ -631,7 +665,7 @@ impl TreasuryContract {
             }
 
             token_client.transfer(&env.current_contract_address(), &recipient, &amount);
-            events::fee_withdrawn(&env, &token, amount);
+            events::fee_withdrawn(&env, &admin, &token, amount);
         }
 
         Ok(())
@@ -666,7 +700,7 @@ impl TreasuryContract {
         admin: Address,
         token: Address,
         recipient: Address,
-    ) -> Result<(), TreasuryError> {
+    ) -> Result<(), KoraError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         Self::require_whitelisted_token(&env, &token)?;
@@ -678,6 +712,9 @@ impl TreasuryContract {
         if !declared {
             return Err(KoraError::EmergencyNotDeclared);
         }
+        Self::require_no_quorum_required(&env)?;
+        Self::do_emergency_withdraw(&env, &admin, &token, &recipient)
+    }
 
     fn do_emergency_withdraw(
         env: &Env,
@@ -730,7 +767,7 @@ impl TreasuryContract {
             .instance()
             .set(&DataKey::EmergencyDeclared, &true);
         events::emergency_declared(&env, &admin);
-        Self::append_audit_entry(&env, &admin, AdminActionType::DeclareEmergency);
+        Self::append_audit_entry(&env, &admin, AdminActionType::DeclareEmergency, None, None);
         Ok(())
     }
 
@@ -747,7 +784,7 @@ impl TreasuryContract {
             .instance()
             .set(&DataKey::EmergencyDeclared, &false);
         events::emergency_revoked(&env, &admin);
-        Self::append_audit_entry(&env, &admin, AdminActionType::RevokeEmergency);
+        Self::append_audit_entry(&env, &admin, AdminActionType::RevokeEmergency, None, None);
         Ok(())
     }
 
@@ -805,7 +842,7 @@ impl TreasuryContract {
             &(new_cap, env.ledger().timestamp()),
         );
         events::withdrawal_cap_proposed(&env, &admin, &token, new_cap);
-        Self::append_audit_entry(&env, &admin, AdminActionType::ProposeWithdrawalCap);
+        Self::append_audit_entry(&env, &admin, AdminActionType::ProposeWithdrawalCap, Some(token), Some(new_cap));
         Ok(())
     }
 
@@ -829,17 +866,14 @@ impl TreasuryContract {
     ///
     /// **Security:** Requires `admin.require_auth()`. Clears the proposal atomically before
     /// applying the new cap. Emits `withdrawal_cap_updated` event.
-    pub fn execute_withdrawal_cap(env: Env, admin: Address) -> Result<(), TreasuryError> {
+    pub fn execute_withdrawal_cap(env: Env, admin: Address, token: Address) -> Result<(), TreasuryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         let proposal_key = DataKey::WithdrawalCapProposal(token.clone());
         let (new_cap, proposed_at): (i128, u64) = env
             .storage()
             .instance()
-            .get(&DataKey::WithdrawalCapProposal)
-            .ok_or(KoraError::NoUpgradeProposed)?;
-        if env.ledger().timestamp() < proposed_at + UPGRADE_TIMELOCK_DELAY {
-            return Err(KoraError::UpgradeTimelockNotElapsed);
+            .get(&proposal_key)
             .ok_or(TreasuryError::NoCapChangeProposed)?;
         if env.ledger().timestamp() < proposed_at + UPGRADE_TIMELOCK_DELAY {
             return Err(TreasuryError::WithdrawalCapTimelockNotElapsed);
@@ -849,7 +883,7 @@ impl TreasuryContract {
         env.storage().instance().set(&cap_key, &new_cap);
         env.storage().instance().remove(&proposal_key);
         events::withdrawal_cap_updated(&env, &admin, &token, old_cap, new_cap);
-        Self::append_audit_entry(&env, &admin, AdminActionType::ExecuteWithdrawalCap);
+        Self::append_audit_entry(&env, &admin, AdminActionType::ExecuteWithdrawalCap, Some(token), Some(new_cap));
         Ok(())
     }
 
@@ -972,7 +1006,7 @@ impl TreasuryContract {
 
         // Aggregate data for each whitelisted token
         for i in 0..whitelisted_tokens.len() {
-            if let Ok(token) = whitelisted_tokens.get(i) {
+            if let Some(token) = whitelisted_tokens.get(i) {
                 // Get accumulated inflows (fees collected for this token)
                 let inflows: i128 = env
                     .storage()
@@ -1032,23 +1066,7 @@ impl TreasuryContract {
             .unwrap_or(0)
     }
 
-    // ── Internal Audit Helpers ────────────────────────────────────────────────
-
-    /// Append one audit entry to the ring buffer.
-    ///
-    /// Behaviour:
-    /// 1. Build the entry (sequence = total, timestamp = now).
-    /// 2. Update the rolling checksum: checksum = sha256(prev_checksum || entry_bytes).
-    /// 3. Emit ADM_AUDIT event (canonical off-chain history).
-    /// 4. If `total % MAX_AUDIT_LOG_SIZE == 0` AND total > 0, a wraparound is about to
-    ///    begin — read the slot we're about to overwrite and emit an `audit_checkpoint`
-    ///    event carrying the current checksum and the discarded entry.
-    /// 5. Write the entry into the ring-buffer slot and advance head/total.
-    fn append_audit_entry(env: &Env, actor: &Address, action: String) {
-        let total: u64 = env
-            .storage()
-            .instance()
-            .get(&DataKey::AuditTotal)
+    // ── Views ─────────────────────────────────────────────────────────────────
     /// Returns the running total of fees collected for a given token (informational ledger).
     ///
     /// This counter is maintained by `collect_fee` and decremented by `withdraw`. It is
@@ -1148,13 +1166,13 @@ impl TreasuryContract {
             // Attempt conversion; if it fails (missing price, stale, etc.), skip this token
             let converted = match oracle_client.try_convert_with_decimals(
                 &collected,
-                symbol,
+                &symbol,
                 &reference_currency,
-                decimals,
+                &decimals,
                 &ref_decimals,
             ) {
-                Ok(val) => val,
-                Err(_) => 0, // Skip this token's contribution if conversion fails
+                Ok(Ok(val)) => val,
+                _ => 0, // Skip this token's contribution if conversion fails
             };
 
             total = total
@@ -1192,10 +1210,15 @@ impl TreasuryContract {
         if pending != new_admin {
             return Err(KoraError::NotPendingAdmin);
         }
+        let current_admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .unwrap_or(new_admin.clone());
         env.storage().persistent().set(&DataKey::Admin, &new_admin);
         Self::bump_persistent(&env, &DataKey::Admin);
         env.storage().persistent().remove(&DataKey::PendingAdmin);
-        events::admin_transferred(&env, &new_admin);
+        events::admin_transferred(&env, &current_admin, &new_admin);
         Ok(())
     }
 
@@ -1231,8 +1254,8 @@ impl TreasuryContract {
     ) -> Result<(), TreasuryError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
-        Self::require_no_quorum_required(&env)?;
-        Self::do_propose_upgrade(&env, &admin, &new_wasm_hash)
+        Self::do_propose_upgrade(&env, &admin, &new_wasm_hash)?;
+        Ok(())
     }
 
     fn do_propose_upgrade(
@@ -1292,14 +1315,12 @@ impl TreasuryContract {
 
     // ── Audit Log ─────────────────────────────────────────────────────────────
 
-    /// Return a page of audit log entries, newest first.
-    /// `page` is 0-indexed; `page_size` is clamped to 1–50.
-    pub fn get_audit_log(env: Env, page: u32, page_size: u32) -> Vec<AdminAuditEntry> {
-        let page_size = (page_size.max(1).min(50)) as u64;
+    /// Internal audit log entry append with rolling checksum.
+    fn append_audit_entry_internal(env: &Env, actor: &Address, action: String) {
         let total: u64 = env
             .storage()
             .instance()
-            .get(&DataKey::AuditLogTotal)
+            .get(&DataKey::AuditTotal)
             .unwrap_or(0);
         let head: u64 = env
             .storage()
@@ -1364,34 +1385,6 @@ impl TreasuryContract {
         env.storage()
             .instance()
             .set(&DataKey::AuditTotal, &(total + 1));
-    }
-
-    // ── Auth Helpers ──────────────────────────────────────────────────────────
-            .get(&DataKey::AuditLogHead)
-            .unwrap_or(0);
-        let stored = total.min(MAX_AUDIT_LOG_SIZE);
-
-        let skip = (page as u64).saturating_mul(page_size);
-        let mut results = Vec::new(&env);
-
-        let mut i: u64 = 0;
-        while i < page_size {
-            let offset = skip + i;
-            if offset >= stored {
-                break;
-            }
-            let pos = (head + MAX_AUDIT_LOG_SIZE - 1 - offset) % MAX_AUDIT_LOG_SIZE;
-            if let Some(entry) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, AdminAuditEntry>(&DataKey::AuditEntry(pos))
-            {
-                results.push_back(entry);
-            }
-            i += 1;
-        }
-
-        results
     }
 
     // ── Recipient allowlist (#457) ───────────────────────────────────────────
@@ -1843,7 +1836,7 @@ impl TreasuryContract {
             .set(&DataKey::DistributionProposal, &proposal);
         Self::bump_persistent(&env, &DataKey::DistributionProposal);
 
-        events::fee_collected(&env, &admin, epoch as i128, distribution_bps as i128, &env.current_contract_address());
+        events::fee_collected(&env, &admin, epoch, distribution_bps as i128, &env.current_contract_address());
         Ok(())
     }
 
@@ -1922,7 +1915,7 @@ impl TreasuryContract {
             .ok_or(TreasuryError::NotEligibleStakeholder)?;
 
         // Verify stakeholder is in the list
-        let is_eligible = config.stakeholders.iter().any(|s| s == &stakeholder);
+        let is_eligible = config.stakeholders.iter().any(|s| s == stakeholder);
         if !is_eligible {
             return Err(TreasuryError::NotEligibleStakeholder);
         }
@@ -1950,7 +1943,7 @@ impl TreasuryContract {
 
         // Calculate distribution pool if not yet allocated
         let available_pool = if current_pool == 0 {
-            bps_of(total_collected, config.distribution_bps)?
+            Self::bps_of(total_collected, config.distribution_bps)?
         } else {
             current_pool
         };
@@ -2004,32 +1997,175 @@ impl TreasuryContract {
             .get(&DataKey::DistributionProposal)
     }
 
+    // ── Fee Sweep Automation (#742) ─────────────────────────────────────────
+
+    /// Configure destinations and percentage splits for fee sweeps. Admin only.
+    ///
+    /// **Parameters:**
+    /// - `splits` — A list of (destination, split_bps) tuples. The sum of split_bps
+    ///   across all destinations must equal exactly 10,000 basis points (100%).
+    /// - `primary` — The primary destination address that will receive any rounding dust.
+    ///
+    /// **Errors:**
+    /// - `TreasuryError::NotAdmin` — Caller is not the admin.
+    /// - `TreasuryError::InvalidSweepSplits` — Splits is empty, contains an invalid address,
+    ///   or the sum of split_bps does not equal 10,000.
+    pub fn configure_sweep_splits(
+        env: Env,
+        admin: Address,
+        splits: Vec<(Address, u32)>,
+        primary: Address,
+    ) -> Result<(), TreasuryError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        if splits.is_empty() {
+            return Err(TreasuryError::InvalidSweepSplits);
+        }
+
+        let mut total_bps: u32 = 0;
+        let mut has_primary = false;
+        for i in 0..splits.len() {
+            let (dest, bps) = splits.get(i).unwrap();
+            kora_shared::validation::require_not_self(&env, &dest)?;
+            if dest == primary {
+                has_primary = true;
+            }
+            total_bps = total_bps
+                .checked_add(bps)
+                .ok_or(TreasuryError::ArithmeticOverflow)?;
+        }
+
+        if total_bps != 10_000 || !has_primary {
+            return Err(TreasuryError::InvalidSweepSplits);
+        }
+
+        env.storage().persistent().set(&DataKey::SweepSplit, &splits);
+        Self::bump_persistent(&env, &DataKey::SweepSplit);
+        env.storage().persistent().set(&DataKey::SweepPrimaryDestination, &primary);
+        Self::bump_persistent(&env, &DataKey::SweepPrimaryDestination);
+
+        events::sweep_splits_configured(&env, &admin, splits.len(), env.ledger().timestamp());
+        Ok(())
+    }
+
+    /// Read the currently configured sweep split destinations and percentages.
+    pub fn get_sweep_splits(env: Env) -> Option<Vec<(Address, u32)>> {
+        env.storage().persistent().get(&DataKey::SweepSplit)
+    }
+
+    /// Read the primary destination that receives rounding dust during sweeps.
+    pub fn get_sweep_primary_destination(env: Env) -> Option<Address> {
+        env.storage().persistent().get(&DataKey::SweepPrimaryDestination)
+    }
+
+    /// Permissionless sweep entrypoint: sweeps accumulated protocol fees for a given token
+    /// to the configured split destinations according to their basis point allocations.
+    ///
+    /// **Parameters:**
+    /// - `token` — The token contract address to sweep.
+    ///
+    /// **Behavior:**
+    /// - Checks that the token is whitelisted.
+    /// - Rejects if sweep splits have not been configured (`SweepSplitsNotConfigured`).
+    /// - Distributable amount is `Collected(token) - ReserveBalance(token)`.
+    /// - If distributable amount is <= 0, gracefully returns `Ok(())` (no-op).
+    /// - Protects against reentrancy via `ReentrancyGuard`.
+    /// - Transfers allocated shares to each destination, and routes rounding dust to the
+    ///   configured primary destination.
+    /// - Updates `Collected(token)` accounting by subtracting the swept amount.
+    /// - Emits `sweep_executed` events for each destination.
+    pub fn sweep(env: Env, token: Address) -> Result<(), TreasuryError> {
+        Self::require_whitelisted_token(&env, &token)?;
+
+        let splits: Vec<(Address, u32)> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SweepSplit)
+            .ok_or(TreasuryError::SweepSplitsNotConfigured)?;
+
+        let primary: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::SweepPrimaryDestination)
+            .ok_or(TreasuryError::SweepSplitsNotConfigured)?;
+
+        let token_client = token::Client::new(&env, &token);
+        let balance = token_client.balance(&env.current_contract_address());
+        let reserved: i128 = env
+            .storage()
+            .persistent()
+            .get(&DataKey::ReserveBalance(token.clone()))
+            .unwrap_or(0);
+        let spendable = balance.saturating_sub(reserved);
+
+        let collected_key = DataKey::Collected(token.clone());
+        let collected: i128 = env
+            .storage()
+            .persistent()
+            .get(&collected_key)
+            .unwrap_or(0);
+
+        let distributable = spendable.min(collected);
+        if distributable <= 0 {
+            return Ok(());
+        }
+
+        let _guard = ReentrancyGuard::new(&env)?;
+
+        let mut total_distributed: i128 = 0;
+        let now = env.ledger().timestamp();
+
+        for i in 0..splits.len() {
+            let (dest, bps) = splits.get(i).unwrap();
+            let share = Self::bps_of(distributable, bps)?;
+            if share > 0 {
+                token_client.transfer(&env.current_contract_address(), &dest, &share);
+                events::sweep_executed(&env, &token, &dest, share, now);
+                total_distributed = total_distributed
+                    .checked_add(share)
+                    .ok_or(TreasuryError::ArithmeticOverflow)?;
+            }
+        }
+
+        let dust = distributable.saturating_sub(total_distributed);
+        if dust > 0 {
+            token_client.transfer(&env.current_contract_address(), &primary, &dust);
+            events::sweep_executed(&env, &token, &primary, dust, now);
+            total_distributed = total_distributed
+                .checked_add(dust)
+                .ok_or(TreasuryError::ArithmeticOverflow)?;
+        }
+
+        let new_collected = collected.saturating_sub(total_distributed);
+        env.storage().persistent().set(&collected_key, &new_collected);
+        Self::bump_persistent(&env, &collected_key);
+
+        Ok(())
+    }
+
     // ── Helpers ───────────────────────────────────────────────────────────────
 
-    fn require_admin(env: &Env, caller: &Address) -> Result<(), TreasuryError> {
+    fn require_admin(env: &Env, caller: &Address) -> Result<(), KoraError> {
         let admin: Address = env
             .storage()
             .persistent()
             .get(&DataKey::Admin)
-            .ok_or(TreasuryError::NotInitialized)?;
+            .ok_or(KoraError::NotInitialized)?;
         if &admin != caller {
-            return Err(TreasuryError::NotAdmin);
+            return Err(KoraError::NotAdmin);
         }
         Ok(())
     }
 
-    fn acquire_lock(env: &Env) -> Result<(), KoraError> {
-        let locked: bool = env
-    fn require_whitelisted_token(env: &Env, token: &Address) -> Result<(), TreasuryError> {
+    fn require_whitelisted_token(env: &Env, token: &Address) -> Result<(), KoraError> {
         let whitelisted: bool = env
             .storage()
             .persistent()
             .get(&DataKey::WhitelistedToken(token.clone()))
             .unwrap_or(false);
-        if locked {
-            return Err(KoraError::Unauthorized);
         if !whitelisted {
-            return Err(TreasuryError::TokenNotWhitelisted);
+            return Err(KoraError::TokenNotWhitelisted);
         }
         Ok(())
     }
@@ -2087,7 +2223,7 @@ impl TreasuryContract {
     }
 
     /// Advance the epoch if 24 h have elapsed, then check the cap.
-    fn enforce_rate_limit(env: &Env, amount: i128) -> Result<(), TreasuryError> {
+    fn enforce_rate_limit(env: &Env, token: &Address, amount: i128) -> Result<(), KoraError> {
         let cap: i128 = env
             .storage()
             .instance()
@@ -2117,9 +2253,9 @@ impl TreasuryContract {
 
         let new_total = epoch_withdrawn
             .checked_add(amount)
-            .ok_or(TreasuryError::ArithmeticOverflow)?;
+            .ok_or(KoraError::ArithmeticOverflow)?;
         if new_total > cap {
-            return Err(TreasuryError::WithdrawalRateLimitExceeded);
+            return Err(KoraError::WithdrawalRateLimitExceeded);
         }
         Ok(())
     }
@@ -2175,13 +2311,13 @@ impl TreasuryContract {
     }
 
     /// Calculate basis points of an amount (e.g., 50 bps of 1000 = 5).
-    fn bps_of(amount: i128, bps: u32) -> Result<i128, TreasuryError> {
+    fn bps_of(amount: i128, bps: u32) -> Result<i128, KoraError> {
         let bps_i128 = bps as i128;
         amount
             .checked_mul(bps_i128)
-            .ok_or(TreasuryError::ArithmeticOverflow)?
+            .ok_or(KoraError::ArithmeticOverflow)?
             .checked_div(10_000)
-            .ok_or(TreasuryError::ArithmeticOverflow)
+            .ok_or(KoraError::ArithmeticOverflow)
     }
 
     fn append_audit_entry(
@@ -2319,25 +2455,25 @@ impl TreasuryContract {
         }
 
         for asset in assets.iter() {
-            if let Some(policy) = Self::get_asset_allocation_policy(&env, asset.clone()) {
+            if let Some(policy) = Self::get_asset_allocation_policy(env.clone(), asset.clone()) {
                 // Get current balance for this asset
-                if let Ok(token_client) = token::Client::new(&env, &asset) {
-                    if let Ok(balance) = token_client.try_balance(&env.current_contract_address()) {
-                        if balance >= 0 {
-                            // Compute current allocation as bps of total
-                            let current_allocation_bps: u32 = if let Ok(scaled) =
-                                (balance as u128).checked_mul(10_000)
-                            {
-                                if let Ok(result) = scaled.checked_div(total_value as u128) {
-                                    result.min(10_000) as u32
-                                } else {
-                                    10_000
-                                }
-                            } else {
-                                10_000
-                            };
+                let token_client = token::Client::new(&env, &asset);
+                let balance = token_client.balance(&env.current_contract_address());
+                if balance >= 0 {
+                    // Compute current allocation as bps of total
+                    let current_allocation_bps: u32 = if let Some(scaled) =
+                        (balance as u128).checked_mul(10_000)
+                    {
+                        if let Some(result) = scaled.checked_div(total_value as u128) {
+                            result.min(10_000) as u32
+                        } else {
+                            10_000
+                        }
+                    } else {
+                        10_000
+                    };
 
-                            // Check if allocation drifts outside policy range
+                    // Check if allocation drifts outside policy range
                             if current_allocation_bps < policy.min_allocation_bps {
                                 drifts.push_back(AllocationDrift {
                                     asset: asset.clone(),
@@ -2358,8 +2494,6 @@ impl TreasuryContract {
                         }
                     }
                 }
-            }
-        }
 
         drifts
     }
@@ -2438,9 +2572,6 @@ mod tests {
     }
 
     #[test]
-    fn test_set_fee_bps_success() {
-        let (env, admin, client) = setup();
-        assert_eq!(client.get_fee_bps(), 50);
     fn test_get_fee_bps_after_init() {
         let (_env, _admin, client) = setup();
         assert_eq!(client.get_fee_bps(), 50);
@@ -2486,8 +2617,6 @@ mod tests {
     }
 
     #[test]
-    fn test_set_fee_bps_max_succeeds() {
-        let (env, admin, client) = setup();
     fn test_set_fee_bps_max_allowed() {
         let (_env, admin, client) = setup();
         client.set_fee_bps(&admin, &10_000u32);
@@ -2511,6 +2640,9 @@ mod tests {
         let recipient = Address::generate(&env);
         let result = client.try_withdraw(&admin, &token, &recipient, &0i128);
         assert!(result.is_err());
+    }
+
+    #[test]
     fn test_set_fee_bps_over_max_fails() {
         let (_env, admin, client) = setup();
         assert!(client.try_set_fee_bps(&admin, &10_001u32).is_err());
@@ -2684,14 +2816,6 @@ mod tests {
         let log = client.get_audit_log(&1u32);
         assert_eq!(log.len(), 1);
         assert_eq!(log.get(0).unwrap().action, String::from_str(&env, "initialize"));
-    fn test_withdraw_requires_admin() {
-        let (env, _admin, client) = setup();
-        let non_admin = Address::generate(&env);
-        let token = Address::generate(&env);
-        let recipient = Address::generate(&env);
-        assert!(client
-            .try_withdraw(&non_admin, &token, &recipient, &1_000_000i128)
-            .is_err());
     }
 
     #[test]
