@@ -290,3 +290,201 @@ pub struct PendingAction {
     /// Set once the action has been executed to prevent replays.
     pub executed: bool,
 }
+
+// ── Parameter Registry Types ──────────────────────────────────────────────────
+
+/// Keys identifying every governable protocol parameter stored in
+/// `parameter_registry`.  The same enum is used by consuming contracts to
+/// index their local cache, so callers never pass raw strings.
+///
+/// Adding a new parameter: append a new variant here and handle it in
+/// `parameter_registry`'s `set_parameter` dispatch.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum RegistryParamKey {
+    // ── Marketplace ───────────────────────────────────────────────────────────
+    /// Base protocol fee in basis points (0–10 000).
+    MarketplaceFeeBps,
+    /// Fraction of the protocol fee routed to the referrer (0–10 000 bps).
+    ReferrerSplitBps,
+    /// Minimum contribution floor per fund_invoice call (in token's smallest unit).
+    MinContributionAmount,
+    /// Per-risk-tier fee override — AAA tier (bps).
+    TierFeeAaa,
+    /// Per-risk-tier fee override — AA tier (bps).
+    TierFeeAa,
+    /// Per-risk-tier fee override — A tier (bps).
+    TierFeeA,
+    /// Per-risk-tier fee override — B tier (bps).
+    TierFeeB,
+    /// Per-risk-tier fee override — C tier (bps).
+    TierFeeC,
+    // ── Financing Pool ────────────────────────────────────────────────────────
+    /// Late-repayment penalty rate (bps).
+    LatePenaltyBps,
+    /// Fraction of late penalty routed to treasury vs investors (bps).
+    LatePenaltyTreasurySplitBps,
+    /// Maximum per-investor concentration per pool (bps, 1–10 000).
+    MaxPositionBps,
+    /// Grace period before a late invoice can be defaulted (seconds).
+    GracePeriodSecs,
+    // ── Risk Registry ─────────────────────────────────────────────────────────
+    /// Minimum stake amount for a verifier (in staking token's smallest unit).
+    MinimumVerifierStake,
+    /// Fraction of stake to slash per SME default (bps).
+    SlashPercentageBps,
+    /// Minimum acceptable average debtor risk score (0–100, 0 = no gate).
+    MinimumDebtorScore,
+    // ── Treasury ──────────────────────────────────────────────────────────────
+    /// Treasury protocol fee (bps).
+    TreasuryFeeBps,
+    /// Insurance reserve allocation from each fee collection (bps).
+    ReserveAllocationBps,
+}
+
+/// A single governed parameter value.
+///
+/// Parameters are stored as `i128` to accommodate both `u32` fee rates
+/// (which fit comfortably) and `i128` token amounts like `minimum_stake`.
+/// Consuming contracts are responsible for casting back to the expected type
+/// after reading; the registry enforces only the supplied min/max bounds.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct RegistryParam {
+    /// The current governed value.
+    pub value: i128,
+    /// Lower bound (inclusive) for governance proposals (0 = no lower bound).
+    pub min_value: i128,
+    /// Upper bound (inclusive) for governance proposals (0 = no upper bound).
+    pub max_value: i128,
+    /// Ledger timestamp when this value was last updated.
+    pub updated_at: u64,
+    /// Address that last updated this value (governance contract or admin).
+    pub updated_by: Address,
+}
+
+// ── Contributor Badge Types ───────────────────────────────────────────────────
+
+/// Category of a contributor badge.  Determines the minting-authority check
+/// and may be used by future governance-weight integrations.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum BadgeCategory {
+    /// Merged Wave issue or significant code contribution.
+    Code,
+    /// Verified security finding (bug bounty / audit).
+    Security,
+    /// Community service: verifier participation, governance, documentation.
+    Community,
+}
+
+/// On-chain record for a single contributor badge (non-transferable).
+///
+/// The badge is "soulbound" — the `owner` field is set at mint and the
+/// contract's `transfer` entry-point is intentionally absent.  The only
+/// state transitions allowed are `Active → Revoked` (admin revocation for
+/// fraudulent/erroneous badges).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ContributorBadge {
+    /// Monotonically-incrementing badge ID.
+    pub id: u64,
+    /// Address this badge is permanently bound to.
+    pub owner: Address,
+    /// Badge category (Code / Security / Community).
+    pub category: BadgeCategory,
+    /// Short human-readable description of the contribution (max 128 chars).
+    pub description: String,
+    /// IPFS CID of supporting evidence or linked PR/report.
+    pub evidence_cid: String,
+    /// Ledger timestamp when the badge was minted.
+    pub minted_at: u64,
+    /// Whether this badge has been revoked.
+    pub revoked: bool,
+    /// Ledger timestamp when revoked (0 if not revoked).
+    pub revoked_at: u64,
+    /// Optional free-text reason for revocation.
+    pub revocation_reason: Option<String>,
+}
+
+// ── Subject-Initiated Risk Score Dispute Types ────────────────────────────────
+
+/// Status of a subject-initiated risk-score dispute.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ScoreDisputeStatus {
+    /// Dispute filed, score flagged "under review".
+    Open,
+    /// Reviewer upheld the original score.
+    Upheld,
+    /// Reviewer adjusted the score (new value stored on the SME profile).
+    Adjusted,
+    /// Dispute was closed without a finding (e.g., subject withdrew it).
+    Dismissed,
+}
+
+/// A subject-initiated dispute against the subject's own risk score.
+///
+/// Rate-limited at the contract level (max one open dispute per subject per
+/// `SCORE_DISPUTE_RATE_WINDOW_SECS`) to prevent indefinite stalling of
+/// legitimate low scores via repeated filings.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct ScoreDispute {
+    /// Monotonically-incrementing dispute ID.
+    pub id: u64,
+    /// The SME or debtor address that filed the dispute.
+    pub subject: Address,
+    /// Short human-readable reason for the dispute (max 256 chars).
+    pub reason: String,
+    /// Optional IPFS CID of supporting evidence provided by the subject.
+    pub evidence_cid: Option<String>,
+    /// Current status of the dispute.
+    pub status: ScoreDisputeStatus,
+    /// Ledger timestamp when the dispute was filed.
+    pub filed_at: u64,
+    /// Ledger timestamp when the dispute was resolved (0 if still open).
+    pub resolved_at: u64,
+    /// Address that resolved the dispute (admin/governance; None if open).
+    pub resolved_by: Option<Address>,
+    /// Free-text reasoning recorded on resolution for on-chain transparency.
+    pub resolution_notes: Option<String>,
+    /// The risk score at the time the dispute was filed (for audit trail).
+    pub score_at_filing: u32,
+}
+
+// ── Discretionary Treasury Withdrawal Proposal ───────────────────────────────
+
+/// A timelocked, multi-approver discretionary treasury withdrawal proposal.
+///
+/// This is the *strictly separate* path from the fee-sweep and grant-disbursement
+/// flows — any ad-hoc discretionary withdrawal must go through this proposal
+/// lifecycle rather than the direct `withdraw` admin path.
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct DiscretionaryWithdrawal {
+    /// Monotonically-incrementing proposal ID.
+    pub id: u64,
+    /// Token to withdraw.
+    pub token: Address,
+    /// Destination address (must be on the recipient allowlist).
+    pub recipient: Address,
+    /// Amount to withdraw.
+    pub amount: i128,
+    /// Free-text purpose description (max 256 chars) for on-chain transparency.
+    pub purpose: String,
+    /// Proposer address.
+    pub proposer: Address,
+    /// Addresses that have approved (quorum tracked against access_control multisig config).
+    pub approvals: Vec<Address>,
+    /// Ledger timestamp when proposed.
+    pub proposed_at: u64,
+    /// Ledger timestamp before which the proposal cannot be executed (timelock).
+    pub executable_after: u64,
+    /// Ledger timestamp after which the proposal expires.
+    pub expires_at: u64,
+    /// Whether the proposal has been executed.
+    pub executed: bool,
+    /// Whether the proposal has been cancelled.
+    pub cancelled: bool,
+}

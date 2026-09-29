@@ -1239,3 +1239,184 @@ pub fn dispute_payout(
         (invoice_id, amount, env.ledger().timestamp()),
     );
 }
+
+// ── Parameter Registry Events ─────────────────────────────────────────────────
+
+/// Emitted when the parameter registry is initialized.
+/// Schema: (actor=admin, timestamp)
+pub fn registry_param_initialized(env: &Env, admin: &Address) {
+    emit(
+        env,
+        symbol_short!("PR_INIT"),
+        (admin.clone(), env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when a governance proposal to update a registry parameter is submitted.
+/// Schema: (actor=proposer, param_key_hash: u32, new_value, timestamp)
+pub fn param_update_proposed(env: &Env, proposer: &Address, param_key_hash: u32, new_value: i128) {
+    emit(
+        env,
+        symbol_short!("PR_PROP"),
+        (proposer.clone(), param_key_hash, new_value, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when a registry parameter update is approved by a signer.
+/// Schema: (actor=approver, proposal_id, approval_count, timestamp)
+pub fn param_update_approved(env: &Env, approver: &Address, proposal_id: u64, approval_count: u32) {
+    emit(
+        env,
+        symbol_short!("PR_APPR"),
+        (approver.clone(), proposal_id, approval_count, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when a registry parameter is actually updated (proposal executed).
+/// Schema: (actor=executor, param_key_hash: u32, old_value, new_value, timestamp)
+pub fn param_updated(env: &Env, executor: &Address, param_key_hash: u32, old_value: i128, new_value: i128) {
+    emit(
+        env,
+        symbol_short!("PR_UPD"),
+        (executor.clone(), param_key_hash, old_value, new_value, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when a consuming contract refreshes a cached parameter from the registry.
+/// Schema: (contract=consumer, param_key_hash: u32, new_cached_value, timestamp)
+pub fn param_cache_refreshed(env: &Env, consumer: &Address, param_key_hash: u32, new_value: i128) {
+    emit(
+        env,
+        symbol_short!("PR_CACHE"),
+        (consumer.clone(), param_key_hash, new_value, env.ledger().timestamp()),
+    );
+}
+
+// ── Contributor Badge Events ──────────────────────────────────────────────────
+
+/// Emitted when a contributor badge is minted.
+/// Schema: (actor=issuer, badge_id, owner, category_code: u32, timestamp)
+pub fn badge_minted(env: &Env, issuer: &Address, badge_id: u64, owner: &Address, category_code: u32) {
+    emit(
+        env,
+        symbol_short!("BADGE_MNT"),
+        (issuer.clone(), badge_id, owner.clone(), category_code, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when a contributor badge is revoked.
+/// Schema: (actor=admin, badge_id, owner, timestamp)
+pub fn badge_revoked(env: &Env, admin: &Address, badge_id: u64, owner: &Address) {
+    emit(
+        env,
+        symbol_short!("BADGE_RVK"),
+        (admin.clone(), badge_id, owner.clone(), env.ledger().timestamp()),
+    );
+}
+
+// ── Subject-Initiated Score Dispute Events ────────────────────────────────────
+
+/// Emitted when a subject (SME/debtor) files a dispute against their own score.
+/// Schema: (actor=subject, dispute_id, score_at_filing, timestamp)
+pub fn score_dispute_filed(env: &Env, subject: &Address, dispute_id: u64, score_at_filing: u32) {
+    emit(
+        env,
+        symbol_short!("SD_FILE"),
+        (subject.clone(), dispute_id, score_at_filing, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when evidence is submitted for a score dispute.
+/// Schema: (actor=subject, dispute_id, timestamp)
+pub fn score_dispute_evidence_submitted(env: &Env, subject: &Address, dispute_id: u64) {
+    emit(
+        env,
+        symbol_short!("SD_EVID"),
+        (subject.clone(), dispute_id, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when a score dispute is resolved (upheld or adjusted).
+/// Schema: (actor=resolver, dispute_id, subject, status_code: u32, timestamp)
+pub fn score_dispute_resolved(env: &Env, resolver: &Address, dispute_id: u64, subject: &Address, status_code: u32) {
+    emit(
+        env,
+        symbol_short!("SD_RESOL"),
+        (resolver.clone(), dispute_id, subject.clone(), status_code, env.ledger().timestamp()),
+    );
+}
+
+// ── Discretionary Treasury Withdrawal Events ──────────────────────────────────
+
+/// Emitted when a discretionary withdrawal proposal is submitted.
+/// Schema: (actor=proposer, proposal_id, token, recipient, amount, timestamp)
+pub fn discretionary_withdrawal_proposed(
+    env: &Env,
+    proposer: &Address,
+    proposal_id: u64,
+    token: &Address,
+    recipient: &Address,
+    amount: i128,
+) {
+    emit(
+        env,
+        symbol_short!("DW_PROP"),
+        (
+            proposer.clone(),
+            proposal_id,
+            token.clone(),
+            recipient.clone(),
+            amount,
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Emitted when a discretionary withdrawal proposal receives an approval.
+/// Schema: (actor=approver, proposal_id, approval_count, timestamp)
+pub fn discretionary_withdrawal_approved(
+    env: &Env,
+    approver: &Address,
+    proposal_id: u64,
+    approval_count: u32,
+) {
+    emit(
+        env,
+        symbol_short!("DW_APPR"),
+        (approver.clone(), proposal_id, approval_count, env.ledger().timestamp()),
+    );
+}
+
+/// Emitted when a discretionary withdrawal is executed after quorum + timelock.
+/// Schema: (actor=executor, proposal_id, token, recipient, amount, timestamp)
+pub fn discretionary_withdrawal_executed(
+    env: &Env,
+    executor: &Address,
+    proposal_id: u64,
+    token: &Address,
+    recipient: &Address,
+    amount: i128,
+) {
+    emit(
+        env,
+        symbol_short!("DW_EXEC"),
+        (
+            executor.clone(),
+            proposal_id,
+            token.clone(),
+            recipient.clone(),
+            amount,
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
+/// Emitted when a discretionary withdrawal proposal is cancelled.
+/// Schema: (actor=admin, proposal_id, timestamp)
+pub fn discretionary_withdrawal_cancelled(env: &Env, admin: &Address, proposal_id: u64) {
+    emit(
+        env,
+        symbol_short!("DW_CXL"),
+        (admin.clone(), proposal_id, env.ledger().timestamp()),
+    );
+}
