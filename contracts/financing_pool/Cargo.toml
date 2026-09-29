@@ -23,3 +23,8 @@ kora-access-control = { path = "../access_control" }
 kora-price-oracle = { path = "../price_oracle" }
 kora-dispute-resolution = { path = "../dispute_resolution" }
 proptest = "1.4"
+
+# ── Formal model integration test ─────────────────────────────────────────────
+[[test]]
+name = "formal_model"
+path = "tests/formal_model.rs"
