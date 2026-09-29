@@ -19,6 +19,11 @@ pub enum GovernanceError {
     AlreadyVoted = 8,
     TargetChangedOrStale = 9,
     ArithmeticOverflow = 10,
+    NotEligibleForFastTrack = 11,
+    FastTrackThresholdNotMet = 12,
+    FastTrackTimelockNotElapsed = 13,
+    ProposalTooLarge = 14,
+    NoBugBountyReportLinked = 15,
 }
 
 #[contracttype]
@@ -28,6 +33,33 @@ pub enum ProposalStatus {
     Passed,
     Failed,
     Executed,
+}
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum ProposalType {
+    Standard,
+    FastTrack,
+}
+
+/// Fast-track proposal for critical security fixes.
+/// Requires higher threshold but shorter timelock than standard proposals.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct FastTrackProposal {
+    pub id: u64,
+    pub proposer: Address,
+    pub action_hash: BytesN<32>,
+    pub target_contract: Address,
+    pub bug_bounty_report_id: u64,  // Link to confirmed critical bug report
+    pub votes_for: i128,
+    pub votes_against: i128,
+    pub voting_end_time: u64,
+    pub status: ProposalStatus,
+    pub initial_target_hash: BytesN<32>,
+    pub proposal_size_bytes: u32,   // Enforces minimal scope
+    pub created_at: u64,
+    pub disclosure_published: bool,  // Post-hoc disclosure requirement
 }
 
 #[contracttype]
@@ -58,6 +90,13 @@ pub enum DataKey {
     Voted(u64, Address),
     StakedBalance(Address),
     TargetCurrentHash(Address),
+    // Fast-track configuration
+    FastTrackEnabled,
+    FastTrackThresholdBps,        // Higher than standard (e.g., 7500 = 75%)
+    FastTrackTimelock,            // Shorter than standard (e.g., 7200 = 2h)
+    FastTrackMaxProposalSize,     // Bytes limit to prevent bundling
+    FastTrackProposal(u64),
+    BugBountyReportSeverity(u64), // Critical severity confirmation
 }
 
 #[contract]
@@ -227,6 +266,251 @@ impl GovernanceContract {
         env.storage().persistent().set(&DataKey::Proposal(proposal_id), &prop);
 
         Ok(())
+    }
+
+    // ── Fast-Track Governance ─────────────────────────────────────────────────
+
+    /// Configure fast-track governance parameters. Admin only.
+    pub fn configure_fast_track(
+        env: Env,
+        admin: Address,
+        enabled: bool,
+        threshold_bps: u32,
+        timelock_seconds: u64,
+        max_proposal_size: u32,
+    ) -> Result<(), GovernanceError> {
+        let stored_admin: Address = env.storage().persistent().get(&DataKey::Admin).ok_or(GovernanceError::NotInitialized)?;
+        admin.require_auth();
+        if admin != stored_admin {
+            return Err(GovernanceError::Unauthorized);
+        }
+
+        env.storage().persistent().set(&DataKey::FastTrackEnabled, &enabled);
+        env.storage().persistent().set(&DataKey::FastTrackThresholdBps, &threshold_bps);
+        env.storage().persistent().set(&DataKey::FastTrackTimelock, &timelock_seconds);
+        env.storage().persistent().set(&DataKey::FastTrackMaxProposalSize, &max_proposal_size);
+
+        Ok(())
+    }
+
+    /// Register a critical bug bounty report (called by bug bounty system). Admin only.
+    pub fn register_critical_bug_report(
+        env: Env,
+        admin: Address,
+        report_id: u64,
+    ) -> Result<(), GovernanceError> {
+        let stored_admin: Address = env.storage().persistent().get(&DataKey::Admin).ok_or(GovernanceError::NotInitialized)?;
+        admin.require_auth();
+        if admin != stored_admin {
+            return Err(GovernanceError::Unauthorized);
+        }
+
+        env.storage().persistent().set(&DataKey::BugBountyReportSeverity(report_id), &true);
+        Ok(())
+    }
+
+    /// Create a fast-track proposal for critical security fixes.
+    /// 
+    /// **Requirements:**
+    /// - Must be linked to a confirmed critical bug bounty report
+    /// - Proposal size must be within max_proposal_size limit
+    /// - Fast-track must be enabled
+    pub fn create_fast_track_proposal(
+        env: Env,
+        proposer: Address,
+        target_contract: Address,
+        action_hash: BytesN<32>,
+        bug_bounty_report_id: u64,
+        proposal_size_bytes: u32,
+    ) -> Result<u64, GovernanceError> {
+        proposer.require_auth();
+
+        // Check fast-track is enabled
+        let enabled: bool = env.storage().persistent().get(&DataKey::FastTrackEnabled).unwrap_or(false);
+        if !enabled {
+            return Err(GovernanceError::NotEligibleForFastTrack);
+        }
+
+        // Verify bug bounty report is registered as critical
+        let is_critical: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::BugBountyReportSeverity(bug_bounty_report_id))
+            .unwrap_or(false);
+        if !is_critical {
+            return Err(GovernanceError::NoBugBountyReportLinked);
+        }
+
+        // Check proposal size constraint
+        let max_size: u32 = env.storage().persistent().get(&DataKey::FastTrackMaxProposalSize).unwrap_or(1000);
+        if proposal_size_bytes > max_size {
+            return Err(GovernanceError::ProposalTooLarge);
+        }
+
+        // Check proposer stake
+        let min_stake: i128 = env.storage().persistent().get(&DataKey::MinStakeToPropose).unwrap_or(0);
+        let proposer_stake: i128 = env.storage().persistent().get(&DataKey::StakedBalance(proposer.clone())).unwrap_or(0);
+        if proposer_stake < min_stake {
+            return Err(GovernanceError::InsufficientStake);
+        }
+
+        let mut count: u64 = env.storage().persistent().get(&DataKey::ProposalCount).unwrap_or(0);
+        count += 1;
+
+        let timelock: u64 = env.storage().persistent().get(&DataKey::FastTrackTimelock).unwrap_or(7200);
+
+        let current_target_hash: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TargetCurrentHash(target_contract.clone()))
+            .unwrap_or(BytesN::from_array(&env, &[0u8; 32]));
+
+        let fast_track_prop = FastTrackProposal {
+            id: count,
+            proposer,
+            action_hash,
+            target_contract,
+            bug_bounty_report_id,
+            votes_for: 0,
+            votes_against: 0,
+            voting_end_time: env.ledger().timestamp() + timelock,
+            status: ProposalStatus::Active,
+            initial_target_hash: current_target_hash,
+            proposal_size_bytes,
+            created_at: env.ledger().timestamp(),
+            disclosure_published: false,
+        };
+
+        env.storage().persistent().set(&DataKey::FastTrackProposal(count), &fast_track_prop);
+        env.storage().persistent().set(&DataKey::ProposalCount, &count);
+
+        Ok(count)
+    }
+
+    /// Vote on a fast-track proposal (same voting mechanism as standard).
+    pub fn vote_fast_track(
+        env: Env,
+        voter: Address,
+        proposal_id: u64,
+        support: bool,
+    ) -> Result<(), GovernanceError> {
+        voter.require_auth();
+
+        let mut prop: FastTrackProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FastTrackProposal(proposal_id))
+            .ok_or(GovernanceError::ProposalNotFound)?;
+
+        if prop.status != ProposalStatus::Active || env.ledger().timestamp() >= prop.voting_end_time {
+            return Err(GovernanceError::ProposalClosed);
+        }
+
+        if env.storage().persistent().has(&DataKey::Voted(proposal_id, voter.clone())) {
+            return Err(GovernanceError::AlreadyVoted);
+        }
+
+        let weight: i128 = env.storage().persistent().get(&DataKey::StakedBalance(voter.clone())).unwrap_or(0);
+        if weight <= 0 {
+            return Err(GovernanceError::InsufficientStake);
+        }
+
+        if support {
+            prop.votes_for = prop.votes_for.checked_add(weight).ok_or(GovernanceError::ArithmeticOverflow)?;
+        } else {
+            prop.votes_against = prop.votes_against.checked_add(weight).ok_or(GovernanceError::ArithmeticOverflow)?;
+        }
+
+        env.storage().persistent().set(&DataKey::Voted(proposal_id, voter), &true);
+        env.storage().persistent().set(&DataKey::FastTrackProposal(proposal_id), &prop);
+
+        Ok(())
+    }
+
+    /// Execute a fast-track proposal with higher threshold and shorter timelock.
+    pub fn execute_fast_track_proposal(env: Env, proposal_id: u64) -> Result<(), GovernanceError> {
+        let mut prop: FastTrackProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FastTrackProposal(proposal_id))
+            .ok_or(GovernanceError::ProposalNotFound)?;
+
+        if prop.status == ProposalStatus::Executed {
+            return Ok(());
+        }
+
+        // Check fast-track timelock elapsed
+        let timelock: u64 = env.storage().persistent().get(&DataKey::FastTrackTimelock).unwrap_or(7200);
+        if env.ledger().timestamp() < prop.created_at + timelock {
+            return Err(GovernanceError::FastTrackTimelockNotElapsed);
+        }
+
+        let total_votes = prop.votes_for + prop.votes_against;
+        let quorum: i128 = env.storage().persistent().get(&DataKey::Quorum).unwrap_or(0);
+        let fast_track_threshold: u32 = env.storage().persistent().get(&DataKey::FastTrackThresholdBps).unwrap_or(7500);
+
+        if total_votes < quorum {
+            prop.status = ProposalStatus::Failed;
+            env.storage().persistent().set(&DataKey::FastTrackProposal(proposal_id), &prop);
+            return Err(GovernanceError::ProposalNotPassed);
+        }
+
+        let approval_bps = (prop.votes_for * 10000) / total_votes;
+        if approval_bps < fast_track_threshold as i128 {
+            prop.status = ProposalStatus::Failed;
+            env.storage().persistent().set(&DataKey::FastTrackProposal(proposal_id), &prop);
+            return Err(GovernanceError::FastTrackThresholdNotMet);
+        }
+
+        // Verify target hasn't changed
+        let current_target_hash: BytesN<32> = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TargetCurrentHash(prop.target_contract.clone()))
+            .unwrap_or(BytesN::from_array(&env, &[0u8; 32]));
+
+        if current_target_hash != prop.initial_target_hash {
+            prop.status = ProposalStatus::Failed;
+            env.storage().persistent().set(&DataKey::FastTrackProposal(proposal_id), &prop);
+            return Err(GovernanceError::TargetChangedOrStale);
+        }
+
+        prop.status = ProposalStatus::Executed;
+        env.storage().persistent().set(&DataKey::FastTrackProposal(proposal_id), &prop);
+
+        // Execute immediately (no standard timelock delay)
+        propose_upgrade(&env, prop.proposer.clone(), prop.action_hash.clone());
+
+        Ok(())
+    }
+
+    /// Mark fast-track proposal disclosure as published (mandatory post-hoc).
+    pub fn publish_fast_track_disclosure(
+        env: Env,
+        admin: Address,
+        proposal_id: u64,
+    ) -> Result<(), GovernanceError> {
+        let stored_admin: Address = env.storage().persistent().get(&DataKey::Admin).ok_or(GovernanceError::NotInitialized)?;
+        admin.require_auth();
+        if admin != stored_admin {
+            return Err(GovernanceError::Unauthorized);
+        }
+
+        let mut prop: FastTrackProposal = env
+            .storage()
+            .persistent()
+            .get(&DataKey::FastTrackProposal(proposal_id))
+            .ok_or(GovernanceError::ProposalNotFound)?;
+
+        prop.disclosure_published = true;
+        env.storage().persistent().set(&DataKey::FastTrackProposal(proposal_id), &prop);
+
+        Ok(())
+    }
+
+    /// Get fast-track proposal details.
+    pub fn get_fast_track_proposal(env: Env, proposal_id: u64) -> Option<FastTrackProposal> {
+        env.storage().persistent().get(&DataKey::FastTrackProposal(proposal_id))
     }
 }
 
