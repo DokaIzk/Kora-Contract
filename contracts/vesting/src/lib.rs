@@ -1,0 +1,626 @@
+#![no_std]
+
+use kora_shared::{
+    errors::CommonError,
+    events,
+    validation::{require_non_negative_amount, UPGRADE_TIMELOCK_DELAY},
+};
+use soroban_sdk::{
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Vec,
+};
+
+// ── Errors ────────────────────────────────────────────────────────────────────
+
+#[contracterror]
+#[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
+#[repr(u32)]
+pub enum VestingError {
+    AlreadyInitialized = 1,
+    NotInitialized = 2,
+    NotAdmin = 3,
+    InvalidGrant = 4,
+    GrantNotFound = 5,
+    InsufficientVestedBalance = 6,
+    ArithmeticOverflow = 7,
+    InvalidAddress = 8,
+    InvalidAmount = 9,
+    GrantAlreadyRevoked = 10,
+    InvalidVestingSchedule = 11,
+    NoUpgradeProposed = 12,
+    UpgradeTimelockNotElapsed = 13,
+}
+
+impl From<CommonError> for VestingError {
+    fn from(e: CommonError) -> Self {
+        match e {
+            CommonError::InvalidAmount => VestingError::InvalidAmount,
+            CommonError::InvalidAddress => VestingError::InvalidAddress,
+            CommonError::ArithmeticOverflow => VestingError::ArithmeticOverflow,
+            _ => VestingError::InvalidAmount,
+        }
+    }
+}
+
+// ── Storage TTL constants (~31 days in ledgers) ───────────────────────────────
+const PERSISTENT_BUMP_AMOUNT: u32 = 535_680;
+const PERSISTENT_LIFETIME_THRESHOLD: u32 = 535_680 / 2;
+
+// ── Storage Keys ─────────────────────────────────────────────────────────────
+
+#[contracttype]
+pub enum DataKey {
+    Admin,
+    TokenAddress,
+    Grant(Address),         // beneficiary -> VestingGrant
+    UpgradeProposal,        // (wasm_hash, proposed_at)
+}
+
+// ── Data Types ───────────────────────────────────────────────────────────────
+
+/// A vesting grant for a specific beneficiary with cliff and linear vesting.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct VestingGrant {
+    pub beneficiary: Address,
+    pub total_amount: i128,
+    pub released_amount: i128,
+    pub start_time: u64,
+    pub cliff_duration: u64,      // seconds until first vest
+    pub vesting_duration: u64,    // total duration including cliff
+    pub revoked: bool,
+    pub revoked_at: u64,          // timestamp of revocation (0 if not revoked)
+}
+
+// ── Contract ──────────────────────────────────────────────────────────────────
+
+#[contract]
+pub struct VestingContract;
+
+#[contractimpl]
+impl VestingContract {
+    /// Initialize the vesting contract with admin and token address.
+    ///
+    /// **Parameters:**
+    /// - `admin` — The address that will administer this contract.
+    /// - `token` — The token contract address for vested allocations.
+    ///
+    /// **Errors:**
+    /// - `VestingError::AlreadyInitialized` — Contract has already been initialized.
+    /// - `VestingError::InvalidAddress` — Admin or token is the contract's own address.
+    pub fn initialize(
+        env: Env,
+        admin: Address,
+        token: Address,
+    ) -> Result<(), VestingError> {
+        if env.storage().persistent().has(&DataKey::Admin) {
+            return Err(VestingError::AlreadyInitialized);
+        }
+        kora_shared::validation::require_not_self(&env, &admin)?;
+        kora_shared::validation::require_not_self(&env, &token)?;
+
+        env.storage().persistent().set(&DataKey::Admin, &admin);
+        env.storage().persistent().extend_ttl(
+            &DataKey::Admin,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        env.storage().persistent().set(&DataKey::TokenAddress, &token);
+        env.storage().persistent().extend_ttl(
+            &DataKey::TokenAddress,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+
+        Ok(())
+    }
+
+    /// Create a new vesting grant for a beneficiary. Admin only.
+    ///
+    /// **Parameters:**
+    /// - `admin` — Must be the current admin address.
+    /// - `beneficiary` — The address that will receive vested tokens.
+    /// - `total_amount` — Total tokens to vest (must be > 0).
+    /// - `start_time` — Unix timestamp when vesting starts.
+    /// - `cliff_duration` — Duration in seconds before first vest.
+    /// - `vesting_duration` — Total vesting duration in seconds (including cliff).
+    ///
+    /// **Errors:**
+    /// - `VestingError::NotAdmin` — Caller is not the admin.
+    /// - `VestingError::InvalidAmount` — total_amount ≤ 0.
+    /// - `VestingError::InvalidVestingSchedule` — vesting_duration ≤ cliff_duration.
+    /// - `VestingError::InvalidAddress` — beneficiary is contract address.
+    ///
+    /// **Security:** Requires `admin.require_auth()`. Tokens must be transferred
+    /// to contract separately before creating grants.
+    pub fn create_grant(
+        env: Env,
+        admin: Address,
+        beneficiary: Address,
+        total_amount: i128,
+        start_time: u64,
+        cliff_duration: u64,
+        vesting_duration: u64,
+    ) -> Result<(), VestingError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        if total_amount <= 0 {
+            return Err(VestingError::InvalidAmount);
+        }
+        if vesting_duration <= cliff_duration {
+            return Err(VestingError::InvalidVestingSchedule);
+        }
+        kora_shared::validation::require_not_self(&env, &beneficiary)?;
+
+        let grant = VestingGrant {
+            beneficiary: beneficiary.clone(),
+            total_amount,
+            released_amount: 0,
+            start_time,
+            cliff_duration,
+            vesting_duration,
+            revoked: false,
+            revoked_at: 0,
+        };
+
+        let key = DataKey::Grant(beneficiary.clone());
+        env.storage().persistent().set(&key, &grant);
+        Self::bump_persistent(&env, &key);
+
+        Ok(())
+    }
+
+    /// Release vested tokens to the beneficiary. Callable by anyone.
+    ///
+    /// **Parameters:**
+    /// - `beneficiary` — The address whose vested tokens should be released.
+    ///
+    /// **Errors:**
+    /// - `VestingError::GrantNotFound` — No grant exists for this beneficiary.
+    /// - `VestingError::InsufficientVestedBalance` — No vested tokens available to release.
+    ///
+    /// **Security:** No auth required — anyone can trigger release, but tokens
+    /// always go to the beneficiary. Only vested (not unvested) amounts are released.
+    pub fn release(env: Env, beneficiary: Address) -> Result<(), VestingError> {
+        let key = DataKey::Grant(beneficiary.clone());
+        let mut grant: VestingGrant = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(VestingError::GrantNotFound)?;
+
+        let vested = Self::calculate_vested(&env, &grant)?;
+        let releasable = vested
+            .checked_sub(grant.released_amount)
+            .ok_or(VestingError::ArithmeticOverflow)?;
+
+        if releasable <= 0 {
+            return Err(VestingError::InsufficientVestedBalance);
+        }
+
+        grant.released_amount = grant
+            .released_amount
+            .checked_add(releasable)
+            .ok_or(VestingError::ArithmeticOverflow)?;
+
+        env.storage().persistent().set(&key, &grant);
+        Self::bump_persistent(&env, &key);
+
+        let token: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenAddress)
+            .ok_or(VestingError::NotInitialized)?;
+
+        let token_client = token::Client::new(&env, &token);
+        token_client.transfer(&env.current_contract_address(), &beneficiary, &releasable);
+
+        Ok(())
+    }
+
+    /// Revoke a grant, forfeiting unvested tokens. Admin only.
+    ///
+    /// **Parameters:**
+    /// - `admin` — Must be the current admin address.
+    /// - `beneficiary` — The beneficiary whose grant should be revoked.
+    ///
+    /// **Errors:**
+    /// - `VestingError::NotAdmin` — Caller is not the admin.
+    /// - `VestingError::GrantNotFound` — No grant exists for this beneficiary.
+    /// - `VestingError::GrantAlreadyRevoked` — Grant was already revoked.
+    ///
+    /// **Security:** Requires `admin.require_auth()`. Vested amounts remain
+    /// claimable; only unvested future amounts are forfeited. Revoked grants
+    /// freeze vesting calculation at the revocation timestamp.
+    pub fn revoke_grant(
+        env: Env,
+        admin: Address,
+        beneficiary: Address,
+    ) -> Result<(), VestingError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        let key = DataKey::Grant(beneficiary.clone());
+        let mut grant: VestingGrant = env
+            .storage()
+            .persistent()
+            .get(&key)
+            .ok_or(VestingError::GrantNotFound)?;
+
+        if grant.revoked {
+            return Err(VestingError::GrantAlreadyRevoked);
+        }
+
+        grant.revoked = true;
+        grant.revoked_at = env.ledger().timestamp();
+
+        env.storage().persistent().set(&key, &grant);
+        Self::bump_persistent(&env, &key);
+
+        Ok(())
+    }
+
+    /// Get the vested balance for a beneficiary (for governance weight calculation).
+    ///
+    /// **Parameters:**
+    /// - `beneficiary` — The address to query.
+    ///
+    /// **Returns:** The vested (but not necessarily released) balance. Returns 0
+    /// if no grant exists or vesting has not started.
+    ///
+    /// **Security:** Read-only view. This is the critical correctness property for
+    /// governance — only vested amounts count toward voting weight, not total granted.
+    pub fn get_vested_balance(env: Env, beneficiary: Address) -> Result<i128, VestingError> {
+        let key = DataKey::Grant(beneficiary.clone());
+        let grant: VestingGrant = match env.storage().persistent().get(&key) {
+            Some(g) => g,
+            None => return Ok(0),
+        };
+
+        Self::calculate_vested(&env, &grant)
+    }
+
+    /// Get the total unvested balance for a beneficiary.
+    ///
+    /// **Returns:** Total granted minus vested amount.
+    pub fn get_unvested_balance(env: Env, beneficiary: Address) -> Result<i128, VestingError> {
+        let key = DataKey::Grant(beneficiary.clone());
+        let grant: VestingGrant = match env.storage().persistent().get(&key) {
+            Some(g) => g,
+            None => return Ok(0),
+        };
+
+        let vested = Self::calculate_vested(&env, &grant)?;
+        grant
+            .total_amount
+            .checked_sub(vested)
+            .ok_or(VestingError::ArithmeticOverflow)
+    }
+
+    /// Get full grant details for a beneficiary.
+    ///
+    /// **Returns:** The VestingGrant struct, or None if no grant exists.
+    pub fn get_grant(env: Env, beneficiary: Address) -> Option<VestingGrant> {
+        env.storage().persistent().get(&DataKey::Grant(beneficiary))
+    }
+
+    /// Get the current admin address.
+    pub fn get_admin(env: Env) -> Result<Address, VestingError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(VestingError::NotInitialized)
+    }
+
+    /// Get the token address this vesting contract manages.
+    pub fn get_token(env: Env) -> Result<Address, VestingError> {
+        env.storage()
+            .persistent()
+            .get(&DataKey::TokenAddress)
+            .ok_or(VestingError::NotInitialized)
+    }
+
+    // ── Upgrade ────────────────────────────────────────────────────────────────
+
+    /// Propose a WASM upgrade. Admin only. Begins a 24-hour timelock.
+    pub fn propose_upgrade(
+        env: Env,
+        admin: Address,
+        new_wasm_hash: BytesN<32>,
+    ) -> Result<(), VestingError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        env.storage().instance().set(
+            &DataKey::UpgradeProposal,
+            &(new_wasm_hash, env.ledger().timestamp()),
+        );
+
+        Ok(())
+    }
+
+    /// Execute a previously proposed WASM upgrade after the 24-hour timelock.
+    pub fn execute_upgrade(env: Env, admin: Address) -> Result<(), VestingError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+
+        let (wasm_hash, proposed_at): (BytesN<32>, u64) = env
+            .storage()
+            .instance()
+            .get(&DataKey::UpgradeProposal)
+            .ok_or(VestingError::NoUpgradeProposed)?;
+
+        if env.ledger().timestamp() < proposed_at + UPGRADE_TIMELOCK_DELAY {
+            return Err(VestingError::UpgradeTimelockNotElapsed);
+        }
+
+        env.storage().instance().remove(&DataKey::UpgradeProposal);
+        env.deployer().update_current_contract_wasm(wasm_hash);
+
+        Ok(())
+    }
+
+    // ── Internal Helpers ──────────────────────────────────────────────────────
+
+    fn require_admin(env: &Env, addr: &Address) -> Result<(), VestingError> {
+        let admin: Address = env
+            .storage()
+            .persistent()
+            .get(&DataKey::Admin)
+            .ok_or(VestingError::NotInitialized)?;
+        if admin != *addr {
+            return Err(VestingError::NotAdmin);
+        }
+        Ok(())
+    }
+
+    fn bump_persistent(env: &Env, key: &DataKey) {
+        env.storage().persistent().extend_ttl(
+            key,
+            PERSISTENT_LIFETIME_THRESHOLD,
+            PERSISTENT_BUMP_AMOUNT,
+        );
+    }
+
+    /// Calculate the vested amount for a grant at the current ledger timestamp.
+    ///
+    /// **Logic:**
+    /// - Before cliff: 0
+    /// - After cliff, before full vesting: Linear proportion based on time
+    /// - After full vesting: total_amount
+    /// - If revoked: freeze calculation at revocation timestamp
+    fn calculate_vested(env: &Env, grant: &VestingGrant) -> Result<i128, VestingError> {
+        let now = env.ledger().timestamp();
+        let effective_time = if grant.revoked {
+            grant.revoked_at
+        } else {
+            now
+        };
+
+        // Before start time: nothing vested
+        if effective_time < grant.start_time {
+            return Ok(0);
+        }
+
+        let elapsed = effective_time
+            .checked_sub(grant.start_time)
+            .ok_or(VestingError::ArithmeticOverflow)?;
+
+        // Before cliff: nothing vested
+        if elapsed < grant.cliff_duration {
+            return Ok(0);
+        }
+
+        // After full vesting duration: everything vested
+        if elapsed >= grant.vesting_duration {
+            return Ok(grant.total_amount);
+        }
+
+        // Linear vesting between cliff and end
+        // vested = total_amount * elapsed / vesting_duration
+        let vested = (grant.total_amount as i128)
+            .checked_mul(elapsed as i128)
+            .and_then(|v| v.checked_div(grant.vesting_duration as i128))
+            .ok_or(VestingError::ArithmeticOverflow)?;
+
+        Ok(vested)
+    }
+}
+
+// ── Tests ─────────────────────────────────────────────────────────────────────
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use soroban_sdk::testutils::{Address as _, Ledger};
+    use soroban_sdk::{token, Env};
+
+    fn create_token_contract<'a>(env: &Env, admin: &Address) -> token::StellarAssetClient<'a> {
+        token::StellarAssetClient::new(env, &env.register_stellar_asset_contract_v2(admin.clone()).address())
+    }
+
+    #[test]
+    fn test_vesting_lifecycle() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let beneficiary = Address::generate(&env);
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let token_admin = Address::generate(&env);
+        let token = create_token_contract(&env, &token_admin);
+
+        // Initialize
+        client.initialize(&admin, &token.address);
+
+        // Mint tokens to contract
+        token.mint(&contract_id, &10_000);
+
+        // Create grant: 10,000 tokens, 100s cliff, 1000s total duration
+        let start_time = env.ledger().timestamp();
+        client.create_grant(&admin, &beneficiary, &10_000, &start_time, &100, &1000);
+
+        // Before cliff: vested balance is 0
+        let vested = client.get_vested_balance(&beneficiary);
+        assert_eq!(vested, 0);
+
+        // After cliff but before half: should be proportional
+        env.ledger().with_mut(|li| li.timestamp = start_time + 500);
+        let vested = client.get_vested_balance(&beneficiary);
+        assert_eq!(vested, 5_000); // 50% vested
+
+        // Release tokens
+        let balance_before = token.balance(&beneficiary);
+        client.release(&beneficiary);
+        let balance_after = token.balance(&beneficiary);
+        assert_eq!(balance_after - balance_before, 5_000);
+
+        // After full duration: everything vested
+        env.ledger().with_mut(|li| li.timestamp = start_time + 1000);
+        let vested = client.get_vested_balance(&beneficiary);
+        assert_eq!(vested, 10_000);
+    }
+
+    #[test]
+    fn test_revocation_preserves_vested() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let beneficiary = Address::generate(&env);
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let token_admin = Address::generate(&env);
+        let token = create_token_contract(&env, &token_admin);
+
+        client.initialize(&admin, &token.address);
+        token.mint(&contract_id, &10_000);
+
+        let start_time = env.ledger().timestamp();
+        client.create_grant(&admin, &beneficiary, &10_000, &start_time, &100, &1000);
+
+        // Advance to 50% vested
+        env.ledger().with_mut(|li| li.timestamp = start_time + 500);
+        let vested_before_revoke = client.get_vested_balance(&beneficiary);
+        assert_eq!(vested_before_revoke, 5_000);
+
+        // Revoke grant
+        client.revoke_grant(&admin, &beneficiary);
+
+        // Vested amount should remain at 5,000 (frozen at revocation time)
+        let vested_after_revoke = client.get_vested_balance(&beneficiary);
+        assert_eq!(vested_after_revoke, 5_000);
+
+        // Advance time further - vested should still be 5,000 (not increasing)
+        env.ledger().with_mut(|li| li.timestamp = start_time + 900);
+        let vested_later = client.get_vested_balance(&beneficiary);
+        assert_eq!(vested_later, 5_000);
+
+        // Can still release the vested amount
+        client.release(&beneficiary);
+        assert_eq!(token.balance(&beneficiary), 5_000);
+    }
+
+    #[test]
+    fn test_cliff_boundary() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let beneficiary = Address::generate(&env);
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let token_admin = Address::generate(&env);
+        let token = create_token_contract(&env, &token_admin);
+
+        client.initialize(&admin, &token.address);
+        token.mint(&contract_id, &10_000);
+
+        let start_time = 1000u64;
+        env.ledger().with_mut(|li| li.timestamp = start_time);
+
+        client.create_grant(&admin, &beneficiary, &10_000, &start_time, &100, &1000);
+
+        // Exactly at cliff: still nothing vested (cliff is exclusive start)
+        env.ledger().with_mut(|li| li.timestamp = start_time + 99);
+        assert_eq!(client.get_vested_balance(&beneficiary), 0);
+
+        // One second after cliff: should have some vested
+        env.ledger().with_mut(|li| li.timestamp = start_time + 100);
+        let vested = client.get_vested_balance(&beneficiary);
+        assert!(vested > 0);
+
+        // Exactly at end: everything vested
+        env.ledger().with_mut(|li| li.timestamp = start_time + 1000);
+        assert_eq!(client.get_vested_balance(&beneficiary), 10_000);
+
+        // After end: still everything (doesn't go over)
+        env.ledger().with_mut(|li| li.timestamp = start_time + 1500);
+        assert_eq!(client.get_vested_balance(&beneficiary), 10_000);
+    }
+
+    #[test]
+    #[should_panic(expected = "VestingError(InvalidVestingSchedule)")]
+    fn test_invalid_schedule_cliff_equals_duration() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let beneficiary = Address::generate(&env);
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let token_admin = Address::generate(&env);
+        let token = create_token_contract(&env, &token_admin);
+
+        client.initialize(&admin, &token.address);
+
+        // Invalid: cliff == vesting_duration
+        client.create_grant(&admin, &beneficiary, &10_000, &1000, &500, &500);
+    }
+
+    #[test]
+    fn test_governance_weight_excludes_unvested() {
+        let env = Env::default();
+        env.mock_all_auths();
+
+        let admin = Address::generate(&env);
+        let beneficiary = Address::generate(&env);
+        let contract_id = env.register_contract(None, VestingContract);
+        let client = VestingContractClient::new(&env, &contract_id);
+
+        let token_admin = Address::generate(&env);
+        let token = create_token_contract(&env, &token_admin);
+
+        client.initialize(&admin, &token.address);
+        token.mint(&contract_id, &10_000);
+
+        let start_time = env.ledger().timestamp();
+        client.create_grant(&admin, &beneficiary, &10_000, &start_time, &100, &1000);
+
+        // Before cliff: governance weight = 0 (unvested)
+        let vested = client.get_vested_balance(&beneficiary);
+        let unvested = client.get_unvested_balance(&beneficiary);
+        assert_eq!(vested, 0);
+        assert_eq!(unvested, 10_000);
+
+        // At 30%: governance weight = 3,000 (only vested portion)
+        env.ledger().with_mut(|li| li.timestamp = start_time + 300);
+        let vested = client.get_vested_balance(&beneficiary);
+        let unvested = client.get_unvested_balance(&beneficiary);
+        assert_eq!(vested, 3_000);
+        assert_eq!(unvested, 7_000);
+
+        // Fully vested: governance weight = 10,000
+        env.ledger().with_mut(|li| li.timestamp = start_time + 1000);
+        let vested = client.get_vested_balance(&beneficiary);
+        let unvested = client.get_unvested_balance(&beneficiary);
+        assert_eq!(vested, 10_000);
+        assert_eq!(unvested, 0);
+    }
+}
