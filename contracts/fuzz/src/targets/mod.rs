@@ -11,6 +11,10 @@ pub mod access_control;
 pub mod financing_pool;
 pub mod invoice_nft;
 pub mod marketplace;
+/// Targeted fee-calculation and tiered-fee fuzzing harness.
+/// Asserts INV-FEE-1 through INV-FEE-7 across the full valid input space.
+/// See the module-level doc-comment for the invariant descriptions.
+pub mod marketplace_fee;
 pub mod price_oracle;
 pub mod risk_registry;
 pub mod treasury;

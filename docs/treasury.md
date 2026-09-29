@@ -258,6 +258,31 @@ Aggregates collected fees across multiple tokens and converts them all to a sing
   - Overflow is saturated at `i128::MAX`
 - **Errors:** `InvalidAmount` if Vec lengths do not match
 
+## Community Grants
+
+`submit_grant_proposal` accepts a public request containing a recipient, a
+whitelisted token, a scope description, and an ordered list of positive
+milestone amounts. The request and its review/disbursement state are readable
+through `get_grant_proposal`.
+
+Grant activity uses the treasury multisig action path:
+
+```
+submit_grant_proposal(proposer, recipient, token, scope, milestones)
+propose_treasury_action(signer, ReviewGrant(grant_id))
+propose_treasury_action(signer, ReleaseGrantMilestone(grant_id))
+propose_treasury_action(signer, ReclaimGrant(grant_id))
+```
+
+Each review, milestone release, and reclaim needs the configured signer quorum
+and the existing treasury governance timelock. Milestones are released in array
+order, one per approved action; a completed tranche cannot be paid twice. A
+grant cannot be reviewed twice or paid before review. The last outstanding
+tranche can be canceled after 90 days without grant activity; it remains in the
+treasury rather than being transferred to the recipient. The recipient receives
+only completed milestone amounts. Funds reserved for insurance are excluded
+from milestone balance checks.
+
 **Note:** This function currently requires the caller to pass the list of tokens. Once issue #36 (token registry) is implemented, a simpler parameterless `get_total_collected_value(reference_currency)` will iterate all whitelisted tokens automatically.
 
 ---
