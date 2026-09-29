@@ -69,6 +69,11 @@ path = "multisig_threshold_manipulation.rs"
 name = "auth_fuzzing"
 path = "auth_fuzzing.rs"
 
+# ── Economic attack simulation harness (Security hardening wave) ──────────────
+[[test]]
+name = "economic_attack_simulation"
+path = "economic_attack_simulation.rs"
+
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
 kora-shared = { path = "../shared" }
@@ -79,14 +84,8 @@ kora-treasury = { path = "../treasury" }
 kora-risk-registry = { path = "../risk_registry" }
 kora-access-control = { path = "../access_control" }
 kora-price-oracle = { path = "../price_oracle" }
+kora-referral-rewards = { path = "../referral_rewards" }
 
 # ── Integration test targets ──────────────────────────────────────────────────
 # Each [[test]] entry wires a standalone .rs file in contracts/tests/ as a
 # named integration-test binary, making it discoverable by `cargo test --workspace`.
-
-
-
-# ── Cross-contract auth fuzzing harness (Issue #610) ─────────────────────────
-[[test]]
-name = "auth_fuzzing"
-path = "auth_fuzzing.rs"

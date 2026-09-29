@@ -180,3 +180,35 @@ governance.configure_fast_track(
 
 The signer set and threshold are intentionally reused from the B2 multisig so governance starts
 gated by the same trusted set, leaving room to widen stakeholder participation later.
+
+## Impact Simulation Service
+
+`services/governance-sandbox` exposes `simulateImpact(change, snapshot)` for
+proposal previews. Its concentration-cap plugin reports listings over the new
+cap and investors within the configured proximity band. Its fee-tier plugin
+reports affected listings and the estimated fee delta using funded amounts.
+Unrecognized parameter types return a generic before/after diff. Every result
+includes the source snapshot timestamp and is explicitly a current-state
+estimate, not a guarantee of execution impact. The service receives snapshots
+through an adapter so deployments can source indexed protocol state.
+
+## Signature-Based Off-Chain Voting
+
+`services/offchain-voting` provides Stellar Ed25519 vote verification, stake
+weight lookup through the same governance source adapter used for on-chain
+eligibility, proposal-scoped signatures, and deterministic SHA-256 tally
+summaries for on-chain anchoring. Proposal IDs are included in the signed
+message, so a signature cannot be replayed for another proposal. The adapter
+must refuse off-chain voting whenever on-chain voting is open and must verify
+the proposal is designated for the off-chain path. Its repository adapter must
+provide atomic mode reservation and vote insertion in persistent storage; the
+included in-memory store is for tests/development only. Result anchoring and
+optional execution are idempotent on-chain adapter operations and must apply the
+governance contract's quorum and threshold rules. The contract defaults each
+proposal to on-chain voting; an authenticated admin may designate off-chain
+voting before any on-chain votes are cast. On-chain voting is then rejected.
+After the voting deadline, the admin-authenticated adapter may anchor one tally
+hash and its `for`/`against` weights. Execution uses those anchored weights with
+the same quorum and approval threshold as on-chain voting. The hash is publicly
+readable through `get_offchain_result`; the authorized anchor adapter is
+responsible for deriving it from the canonical tally.

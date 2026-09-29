@@ -1,0 +1,143 @@
+# Governance-Forum Bridge Service
+
+Syncs on-chain governance proposals from the `governance_voting` contract with an off-chain discussion forum, creating linked threads and updating vote tallies in real-time.
+
+## Features
+
+- **Automatic Thread Creation**: New proposals automatically get forum threads
+- **Live Vote Tallies**: Threads display current vote counts from chain
+- **Idempotent Sync**: Keyed by proposal ID to prevent duplicate threads
+- **Retry with Backoff**: Handles forum API downtime gracefully
+- **Read-Only**: One-way sync (chain → forum), no forum-triggered actions
+
+## Architecture
+
+```
+Soroban RPC → Governance Monitor → Forum API
+                    ↓
+              Sync Database (SQLite)
+```
+
+1. **Governance Monitor**: Polls governance contract for new/updated proposals
+2. **Sync Database**: Tracks which proposals have been synced to forum
+3. **Forum Client**: Creates/updates threads with retry logic
+
+## Configuration
+
+Environment variables:
+
+```bash
+# Soroban RPC endpoint
+SOROBAN_RPC_URL=https://soroban-testnet.stellar.org
+
+# Governance contract address
+GOVERNANCE_CONTRACT_ID=CXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXXX
+
+# Forum API credentials
+FORUM_API_URL=https://forum.example.com/api/v1
+FORUM_API_KEY=your_api_key_here
+
+# Polling interval (milliseconds)
+POLL_INTERVAL_MS=60000
+
+# Retry configuration
+MAX_RETRIES=5
+RETRY_BACKOFF_MS=5000
+
+# Database path
+DB_PATH=./governance-sync.db
+
+# Logging level
+LOG_LEVEL=info
+```
+
+## Installation
+
+```bash
+npm install
+```
+
+## Usage
+
+```bash
+# Development
+npm run dev
+
+# Production
+npm run build
+npm start
+
+# Tests
+npm test
+```
+
+## Database Schema
+
+```sql
+CREATE TABLE sync_records (
+  proposal_id INTEGER PRIMARY KEY,
+  forum_thread_id TEXT NOT NULL,
+  synced_at INTEGER NOT NULL,
+  last_update INTEGER NOT NULL
+);
+```
+
+## Forum API Requirements
+
+The forum platform must provide:
+
+- `POST /threads` - Create new thread
+- `POST /threads/{id}/posts` - Add post to thread
+
+Request format:
+
+```json
+{
+  "title": "[Proposal #123] Example Proposal",
+  "body": "Markdown-formatted proposal details...",
+  "tags": ["governance", "financial"],
+  "metadata": {
+    "proposal_id": 123,
+    "voting_mode": "Standard"
+  }
+}
+```
+
+## Error Handling
+
+- **Forum API 429/5xx**: Retry with exponential backoff
+- **Forum API 4xx**: Log error, skip proposal (non-retryable)
+- **Contract read failure**: Log warning, continue polling
+- **Database errors**: Fatal, service exits
+
+## Monitoring
+
+Key metrics to monitor:
+
+- Proposals synced vs. on-chain total
+- Forum API error rate
+- Sync lag (time between proposal creation and thread creation)
+- Database size growth
+
+## Testing
+
+```bash
+npm test
+```
+
+Tests cover:
+
+- Idempotent thread creation
+- Retry on forum downtime
+- Tally freshness within bounds
+- Database sync record management
+
+## Security
+
+- Forum API key stored in environment variable (never committed)
+- Read-only access to governance contract
+- No authentication bypass or privilege escalation paths
+
+## License
+
+MIT

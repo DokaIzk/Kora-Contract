@@ -24,8 +24,10 @@
 pub mod audit;
 pub mod errors;
 pub mod events;
+pub mod key_rotation;
 pub mod queue;
 pub mod reentrancy;
 pub mod timelock;
+pub mod ttl_protection;
 pub mod types;
 pub mod validation;

@@ -1,0 +1,169 @@
+# Kora Chaos Engineering Suite
+
+Deliberately injects failures into the **staging** deployment to verify the
+resilience behaviours claimed by other issues in this wave.
+
+> **This suite must never run against production.**
+> The `global-setup.ts` pre-flight guard enforces this via `CHAOS_ENV`.
+
+---
+
+## Scenarios
+
+| # | Scenario file | Target | Resilience Claim Tested |
+|---|---|---|---|
+| 1 | `scenario-rpc-outage` | Indexer | Resumes from checkpoint after RPC downtime; no duplicate event processing |
+| 2 | `scenario-db-latency` | API + Indexer | Remains available or returns 5xx (not silent stale 200) under 2 s DB latency |
+| 3 | `scenario-keeper-crash` | Keeper | No double-submitted transactions after SIGKILL; dedup_key uniqueness survives crash |
+| 4 | `scenario-network-partition` | API | Returns 5xx during API↔DB partition; recovers cleanly after reconnect |
+| 5 | `scenario-indexer-checkpointing` | Indexer | Persists checkpoint to durable storage; resumes from persisted ledger after SIGKILL, not from 0 |
+| 6 | `scenario-reconciliation-alerting` | Reconciler | Fires alert within lag window after ledger gap; buffers alerts when sink is down and drains on recovery |
+
+---
+
+## Staging Run Results
+
+| Scenario | Status | Notes |
+|---|---|---|
+| RPC outage | PASS | Checkpoint resumed at correct ledger; event count monotonically non-decreasing |
+| DB latency | PASS w/ GAP | API returns 503 under sustained latency. **GAP-2**: connection pool does not set `statement_timeout` — API can hang up to 30 s before timing out (see gap below) |
+| Keeper crash | PASS | No duplicate dedup_keys in done set; in_flight drained to 0 after restart |
+| Network partition | **FAIL / GAP-1** | API serves stale 200 from read-through cache for ~8 s after partition (see gap below) |
+| Indexer checkpointing | PASS | Post-SIGKILL restart begins at persisted checkpoint ≥ pre-crash value; monotonicity holds across 3 rapid restart cycles |
+| Reconciliation alerting — gap→alert | PASS | Alert fired within 15 s lag window; gaps-detected counter incremented; pending alert queue non-empty |
+| Reconciliation alerting — buffering | **FAIL / GAP-3** | Alert queue empty while sink is down — alerts dropped rather than buffered (see GAP-3 below) |
+
+---
+
+## Identified Gaps (to be filed as follow-up issues)
+
+### GAP-1 — API read-through cache masks DB partition (network-partition scenario)
+
+- **What happened:** The API's response-level cache returns stale 200 responses
+  for up to 8 seconds after the DB network is disconnected.  The resilience
+  claim requires 5xx on all DB-dependent reads once the pool is exhausted.
+- **Impact:** Callers cannot distinguish "real 200" from "stale cached 200"
+  during a partition, leading to silent data staleness in dashboards.
+- **Proposed fix:** Set cache TTL to 0 on any `Error` thrown by the DB layer,
+  or disable the cache layer entirely during detected DB unavailability.
+- **Priority:** High — affects data integrity guarantees during incidents.
+
+### GAP-2 — DB connection pool lacks `statement_timeout` (db-latency scenario)
+
+- **What happened:** Under 2 s round-trip latency, some API requests hang for
+  up to 30 s rather than returning a 503 with `Retry-After`.
+- **Impact:** Client-facing timeouts surface as HTTP client errors rather than
+  clean 503 responses with retry guidance.
+- **Proposed fix:** Set `statement_timeout = 5000` on the DB pool and map the
+  timeout error to a 503 in the API middleware.
+- **Priority:** Medium.
+
+### GAP-3 — Reconciler drops alerts when alert sink is unavailable (reconciliation-alerting scenario)
+
+- **What happened:** When the alert sink container is paused, the reconciler's
+  alert queue depth stays at 0 — alerts created during the outage are silently
+  discarded rather than queued for retry.  On sink recovery, no buffered alerts
+  are delivered.
+- **Impact:** Operators receive no notification of ledger gaps that occurred
+  during an alerting channel outage, defeating the reconciler's purpose during
+  the most critical failure window (when both a gap and a sink outage coincide).
+- **Proposed fix:** Implement a persistent alert queue (e.g. a SQLite/Postgres
+  `pending_alerts` table) in the reconciler.  On each scan cycle, undelivered
+  alerts are retried with exponential back-off.  Only mark an alert "delivered"
+  after the sink acknowledges receipt (HTTP 2xx or message-queue ack).
+- **Priority:** High — this is a single point of failure in the observability stack.
+
+---
+
+## Running Against Staging
+
+```bash
+# 1. Ensure the staging stack is up:
+docker compose -p kora-staging up -d
+
+# 2. Configure environment (copy and edit):
+cp .env.chaos.example .env.chaos
+# Edit CHAOS_API_URL, CHAOS_INDEXER_ADMIN_URL, etc.
+
+# 3. Install dependencies:
+npm install
+
+# 4. Run the full chaos suite:
+npm test
+
+# 5. Run a single scenario:
+npm test -- --testPathPattern=scenario-rpc-outage
+
+# 6. Run with verbose reconciler lag window:
+CHAOS_RECONCILER_ALERT_LAG_MS=30000 npm test -- --testPathPattern=scenario-reconciliation-alerting
+```
+
+---
+
+## Configuration
+
+Copy `.env.chaos.example` to `.env.chaos` and populate:
+
+```
+CHAOS_ENV=staging
+CHAOS_API_URL=http://localhost:3000
+CHAOS_INDEXER_ADMIN_URL=http://localhost:4000
+CHAOS_KEEPER_ADMIN_URL=http://localhost:8080
+CHAOS_DOCKER_PROJECT=kora-staging
+CHAOS_DB_CONTAINER=kora-postgres
+CHAOS_INDEXER_CONTAINER=kora-indexer
+CHAOS_KEEPER_CONTAINER=kora-keeper
+CHAOS_API_CONTAINER=kora-api
+CHAOS_RPC_CONTAINER=kora-stellar-rpc-mock
+CHAOS_API_DB_NETWORK=kora-internal
+CHAOS_FAILURE_DURATION_MS=10000
+CHAOS_RECOVERY_TIMEOUT_MS=30000
+CHAOS_DB_LATENCY_MS=2000
+CHAOS_RECONCILER_ALERT_LAG_MS=15000
+CHAOS_MOCK_LEDGER_COUNT=3
+CHAOS_ALERT_CONTAINER=kora-alert-relay
+```
+
+---
+
+## Architecture
+
+```
+tests/
+  global-setup.ts                        — pre-flight health check; refuses if CHAOS_ENV=production
+  global-teardown.ts                     — post-suite recovery verification
+  scenario-rpc-outage.chaos.ts           — scenario 1: indexer RPC outage
+  scenario-db-latency.chaos.ts           — scenario 2: database latency spike
+  scenario-keeper-crash.chaos.ts         — scenario 3: keeper service crash
+  scenario-network-partition.chaos.ts    — scenario 4: API↔DB network partition
+  scenario-indexer-checkpointing.chaos.ts — scenario 5: indexer hard crash + durable checkpoint
+  scenario-reconciliation-alerting.chaos.ts — scenario 6: gap-triggered alert + alert buffering
+
+src/
+  config.ts     — all configuration from environment variables
+  injectors.ts  — failure injection: pause container, tc-netem, SIGKILL, network disconnect,
+                  indexer pause/crash, alert sink outage
+  probes.ts     — service health and state observation via HTTP (indexer, keeper, API,
+                  reconciler status, alert queue)
+  logger.ts     — structured logger (pino)
+```
+
+Each scenario follows the same structure:
+1. **Baseline** — record observable state before injection.
+2. **Inject** — call the relevant injector; store the returned `Cleanup`.
+3. **Assert during failure** — probe the service while the failure is active.
+4. **Cleanup** — always called in `afterEach` even if the assertion throws.
+5. **Assert recovery** — wait for healthy, then assert the resilience claim.
+
+---
+
+## Invariants Tested by Scenario
+
+| Scenario | Invariant |
+|---|---|
+| RPC outage | `postCheckpoint >= preCheckpoint` and `postEventCount >= preEventCount` |
+| DB latency | Every response is 200 or ≥ 400 (never 0 = silent hang) |
+| Keeper crash | `done_keys` set is a superset of pre-crash; no key appears twice; `in_flight == 0` post-restart |
+| Network partition | Last two poll responses during partition are not 200; `apiIsHealthy()` returns true post-reconnect |
+| Indexer checkpointing | `postCheckpoint >= precrashCheckpoint`; checkpoint monotone across rapid cycles |
+| Reconciliation alerting | Alert fired within `CHAOS_RECONCILER_ALERT_LAG_MS`; `alertsFired > preAlertsFired`; queue drained after sink recovery |

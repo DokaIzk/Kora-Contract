@@ -3,11 +3,18 @@ export * from './types/notification';
 export * from './types/currency';
 export * from './types/i18n';
 export * from './types/simulation';
+export * from './types/risk';
+export * from './types/funding';
+export * from './types/admin';
+export * from './types/table';
 
 // Services
 export * from './services/fxService';
 export * from './services/notificationService';
 export * from './services/simulationService';
+export * from './services/riskService';
+export * from './services/fundingService';
+export * from './services/adminService';
 
 // Contexts
 export * from './context/LocaleContext';
@@ -34,4 +41,9 @@ export * from './components/simulation/SimulationResultView';
 export * from './components/flows/InvoiceSubmissionFlow';
 export * from './components/flows/MarketplaceBrowsingFlow';
 export * from './components/flows/FundingFlow';
+export * from './components/flows/MultiStepFundingFlow';
 export * from './components/flows/RepaymentFlow';
+
+export * from './components/risk/RiskScoreVisualization';
+export * from './components/admin/AdminConsole';
+export * from './components/common/DataTable';
