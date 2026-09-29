@@ -47,6 +47,10 @@ pub enum AuditSource {
     Treasury,
     RiskRegistry,
     InvoiceNft,
+    ParameterRegistry,
+    ContributorBadges,
+    Marketplace,
+    FinancingPool,
 }
 
 /// Canonical discriminant for every admin-gated operation across the protocol.
@@ -103,7 +107,33 @@ pub enum AdminActionType {
     InvoiceNftExecuteUpgrade,
     InvoiceNftMigrate,
     InvoiceNftSetMintRateLimit,
+    // ── Parameter Registry ────────────────────────────────────────────────────
+    RegistrySetParam,
+    RegistryProposeParam,
+    RegistryApproveParam,
+    RegistryExecuteParam,
+    RegistryCancelParam,
+    RegistrySetGovernance,
+    // ── Contributor Badges ────────────────────────────────────────────────────
+    BadgeMint,
+    BadgeRevoke,
+    BadgeSetIssuer,
+    // ── Subject Score Disputes ────────────────────────────────────────────────
+    ScoreDisputeFile,
+    ScoreDisputeSubmitEvidence,
+    ScoreDisputeResolve,
+    // ── Discretionary Treasury Withdrawals ───────────────────────────────────
+    DiscretionaryWithdrawalPropose,
+    DiscretionaryWithdrawalApprove,
+    DiscretionaryWithdrawalExecute,
+    DiscretionaryWithdrawalCancel,
 }
+
+/// New AuditSource variants for the new contracts.
+/// NOTE: `AuditSource` is defined above with the original variants; we extend it here
+/// by appending new items.  This piggybacks on the existing definition — if the
+/// original enum needs to be edited directly, that is done above.
+// (Extension documented here; actual variant additions are in the original enum above.)
 
 /// A single entry in the on-chain admin audit log.
 #[contracttype]
