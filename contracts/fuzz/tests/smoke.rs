@@ -82,7 +82,60 @@ macro_rules! smoke {
 smoke!(fuzz_access_control, "access_control", kora_fuzz::targets::access_control::run, 0xAC01);
 smoke!(fuzz_invoice_nft, "invoice_nft", kora_fuzz::targets::invoice_nft::run, 0x0F72);
 smoke!(fuzz_marketplace, "marketplace", kora_fuzz::targets::marketplace::run, 0x3A17);
+// Dedicated harness for fee-calculation and tiered-fee invariants (INV-FEE-1..7).
+// Uses a separate corpus directory (`corpus/marketplace_fee/`) and seed so its
+// input space is explored independently from the general marketplace lifecycle harness.
+smoke!(fuzz_marketplace_fee, "marketplace_fee", kora_fuzz::targets::marketplace_fee::run, 0xFE3A);
 smoke!(fuzz_financing_pool, "financing_pool", kora_fuzz::targets::financing_pool::run, 0x9001);
 smoke!(fuzz_treasury, "treasury", kora_fuzz::targets::treasury::run, 0x7EA5);
 smoke!(fuzz_risk_registry, "risk_registry", kora_fuzz::targets::risk_registry::run, 0x815C);
 smoke!(fuzz_price_oracle, "price_oracle", kora_fuzz::targets::price_oracle::run, 0x0AC1);
+
+// ── CI-bounded fee invariant tests ────────────────────────────────────────────
+//
+// These are NOT ignored — they run on every `cargo test` as part of the normal
+// CI pass.  They are bounded to `CI_FEE_ITERS` iterations (default 500) so they
+// complete in < 1 s.  They replicate the INV-FEE-1..7 seed-corpus tests from
+// `marketplace_fee::seeds` but also drive the `run` entry-point with a short
+// random walk, ensuring the CI gate is not purely deterministic.
+//
+// The full smoke harness (`fuzz_marketplace_fee` above, `--ignored`) runs
+// 10 000 iterations; this is the quick sanity gate.
+
+fn ci_fee_iters() -> usize {
+    std::env::var("CI_FEE_ITERS")
+        .ok()
+        .and_then(|v| v.parse().ok())
+        .unwrap_or(500)
+}
+
+#[test]
+fn fee_invariants_ci_bounded_random_walk() {
+    use rand::{RngCore, SeedableRng};
+    let mut rng = rand::rngs::StdRng::seed_from_u64(0xFEE_C1_B0);
+    let mut buf = [0u8; 256];
+    let n = ci_fee_iters();
+    for i in 0..n {
+        let len = 8 + (rng.next_u32() as usize % (buf.len() - 8));
+        rng.fill_bytes(&mut buf[..len]);
+        check_once(
+            "marketplace_fee",
+            kora_fuzz::targets::marketplace_fee::run,
+            &buf[..len],
+            &format!("ci_fee_random_walk iter={i}/{n}"),
+        );
+    }
+}
+
+#[test]
+fn fee_invariants_ci_corpus_replay() {
+    // Replay every seed in the marketplace_fee corpus without the --ignored gate.
+    replay_corpus("marketplace_fee", kora_fuzz::targets::marketplace_fee::run);
+}
+
+#[test]
+fn fee_invariants_ci_seed_cases() {
+    // Run the hand-crafted seed cases defined in the harness itself.
+    kora_fuzz::targets::marketplace_fee::assert_fee_seeds_representative();
+    kora_fuzz::targets::marketplace_fee::assert_fee_seeds_tier_breakpoints();
+}

@@ -96,3 +96,16 @@ kora-referral-rewards = { path = "../referral_rewards" }
 [[test]]
 name = "auth_fuzzing"
 path = "auth_fuzzing.rs"
+
+# ── Formal model regression tests ────────────────────────────────────────────
+[[test]]
+name = "financing_pool_formal_regressions"
+path = "financing_pool_formal_regressions.rs"
+
+# ── Access control penetration tests ─────────────────────────────────────────
+# Structured as an attack tree covering privilege escalation, admin key takeover,
+# multisig quorum bypass, timelock bypass, partial-quorum/stale-action combinations,
+# and guardian abuse. Includes regression tests for confirmed findings PEN-AC-1..3.
+[[test]]
+name = "access_control_pentest"
+path = "access_control_pentest.rs"
