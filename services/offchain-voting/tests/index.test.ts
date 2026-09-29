@@ -1,0 +1,44 @@
+import { OffchainVotingService, MemoryVoteStore, voteMessage, GovernanceSource, Tally } from '../src';
+
+const keypair = require('@stellar/stellar-sdk').Keypair.random();
+const rules = { quorum: 1n, thresholdBps: 5000, votingEndsAt: 100, executeFromResult: true };
+const source: GovernanceSource = {
+  votingWeight: async (_id, voter) => voter === keypair.publicKey() ? 10n : 0n,
+  rules: async () => rules,
+  onChainVotingOpen: async () => false,
+  offchainVotingEnabled: async () => true,
+  anchorResult: jest.fn(async (_id: string, _hash: string, _summary: Tally) => undefined),
+  executeGovernanceProposal: jest.fn(async () => undefined),
+};
+
+test('signatures are bound to the proposal and eligible on-chain weight', async () => {
+  const service = new OffchainVotingService('testnet', source, new MemoryVoteStore(), () => 10);
+  await service.open('proposal-a');
+  const msg = voteMessage('testnet', 'proposal-a', keypair.publicKey(), 'for');
+  const sig = keypair.sign(msg).toString('base64');
+  await expect(service.cast('proposal-b', keypair.publicKey(), 'for', sig)).rejects.toThrow('Invalid vote signature');
+  await expect(service.cast('proposal-a', keypair.publicKey(), 'for', sig)).resolves.toMatchObject({ weight: 10n });
+});
+
+test('refuses a simultaneous on-chain path and rejects duplicate votes', async () => {
+  const store = new MemoryVoteStore();
+  const service = new OffchainVotingService('testnet', source, store, () => 10);
+  await store.reserveMode('p', 'onchain');
+  await expect(service.open('p')).rejects.toThrow('Proposal already uses another voting path');
+  await store.reserveMode('q', 'offchain');
+  const sig = keypair.sign(voteMessage('testnet', 'q', keypair.publicKey(), 'for')).toString('base64');
+  await service.cast('q', keypair.publicKey(), 'for', sig);
+  await expect(service.cast('q', keypair.publicKey(), 'for', sig)).rejects.toThrow('Already voted');
+});
+
+test('anchors the result and executes only when the shared quorum and threshold pass', async () => {
+  const store = new MemoryVoteStore();
+  const service = new OffchainVotingService('testnet', source, store, () => 101);
+  const sig = keypair.sign(voteMessage('testnet', 'p', keypair.publicKey(), 'for')).toString('base64');
+  await service.cast('p', keypair.publicKey(), 'for', sig);
+  const { summary, hash } = await service.finalize('p');
+  expect(summary.passed).toBe(true);
+  expect(hash).toHaveLength(64);
+  expect(source.anchorResult).toHaveBeenCalled();
+  expect(source.executeGovernanceProposal).toHaveBeenCalledWith('p', hash);
+});

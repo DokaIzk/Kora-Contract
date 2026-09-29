@@ -3,6 +3,9 @@ const { fxService } = require('../dist/services/fxService');
 const { NotificationService, notificationService } = require('../dist/services/notificationService');
 const { SimulationService, simulationService } = require('../dist/services/simulationService');
 const { DiversificationService, diversificationService } = require('../dist/services/diversificationService');
+const { RiskService, riskService } = require('../dist/services/riskService');
+const { FundingService, fundingService } = require('../dist/services/fundingService');
+const { AdminService, adminService } = require('../dist/services/adminService');
 
 console.log('=== Running @kora/web Test Suite ===\n');
 
@@ -107,6 +110,61 @@ console.log('\nRunning Transaction Simulation Tests (#785)...');
   );
   assert.strictEqual(check.willBreach, true, 'Prospective contribution should be flagged as breaching cap');
   console.log('✓ Investor Diversification Insights Tests passed.');
+
+  // 6. Risk Score Visualization Test Suite (#777)
+  console.log('\nRunning Risk Score Visualization Tests (#777)...');
+  const rService = new RiskService();
+  assert.strictEqual(rService.getRiskTier(25), 'LOW', 'Score 25 should be LOW tier');
+  assert.strictEqual(rService.getRiskTier(50), 'MEDIUM', 'Score 50 should be MEDIUM tier');
+  assert.strictEqual(rService.getRiskTier(75), 'HIGH', 'Score 75 should be HIGH tier');
+  assert.strictEqual(rService.getRiskTier(90), 'CRITICAL', 'Score 90 should be CRITICAL tier');
+
+  const breakdown = rService.getRiskBreakdown('INV-TEST-001', { isUnderReview: true });
+  assert.strictEqual(breakdown.status, 'UNDER_REVIEW', 'Under review status should be preserved');
+  assert.strictEqual(breakdown.factors.length, 4, 'Should have 4 contributing risk factors');
+  console.log('✓ Risk Score Visualization Tests passed.');
+
+  // 7. Multi-step Funding Flow Test Suite (#779)
+  console.log('\nRunning Multi-step Funding Flow Tests (#779)...');
+  const fService = new FundingService();
+  const feeInfo = fService.calculateFeeBreakdown(2000, 0.5);
+  assert.strictEqual(feeInfo.platformFeeUsd, 10, '0.5% fee on $2000 should be $10');
+  assert.strictEqual(feeInfo.netContributionUsd, 1990, 'Net contribution should be $1990');
+
+  const yieldPreview = fService.calculateYieldPreview(10000, 14.5, 60, 0.5);
+  assert.strictEqual(yieldPreview.platformFeeUsd, 50, 'Platform fee should be $50');
+  assert(yieldPreview.expectedNetYieldUsd > 0, 'Net yield should be positive');
+
+  const capCheckNoBreach = fService.checkConcentrationCap('Acme', 2000, 3000, 10000, 10000);
+  assert.strictEqual(capCheckNoBreach.willBreach, false, 'Projected $5000 exposure within $10k cap should not breach');
+
+  const capCheckBreach = fService.checkConcentrationCap('Acme', 8000, 3000, 10000, 10000);
+  assert.strictEqual(capCheckBreach.willBreach, true, 'Projected $11k exposure over $10k cap should breach');
+  console.log('✓ Multi-step Funding Flow Tests passed.');
+
+  // 8. Admin Console & Multi-Sig Governance Test Suite (#780)
+  console.log('\nRunning Admin Console & Governance Tests (#780)...');
+  const aService = new AdminService();
+  const stateAuthorized = aService.getAdminState('G_SIGNER_ALPHA_01');
+  assert.strictEqual(stateAuthorized.isAuthorizedSigner, true, 'Signer Alpha should be authorized');
+
+  const stateUnauthorized = aService.getAdminState('G_UNAUTHORIZED_999');
+  assert.strictEqual(stateUnauthorized.isAuthorizedSigner, false, 'Unknown wallet should be unauthorized');
+
+  const prop = aService.createProposal('FEE_TIERS', '0.35%', 'G_SIGNER_ALPHA_01', 'Lower fees to 0.35%');
+  assert.strictEqual(prop.status, 'PENDING', 'New proposal should be PENDING');
+  assert.strictEqual(prop.currentSignatures.length, 1, 'Should start with 1 signature');
+
+  aService.signProposal(prop.id, 'G_SIGNER_BETA_02');
+  aService.signProposal(prop.id, 'G_SIGNER_GAMMA_03');
+  assert.strictEqual(prop.status, 'APPROVED', 'Proposal reaching 3 signatures should be APPROVED');
+
+  aService.executeProposal(prop.id);
+  assert.strictEqual(prop.status, 'EXECUTED', 'Executed proposal should have EXECUTED status');
+  const updatedState = aService.getAdminState();
+  const feeParam = updatedState.parameters.find((p) => p.key === 'FEE_TIERS');
+  assert.strictEqual(feeParam.currentValue, '0.35%', 'Fee tier parameter should be updated to 0.35%');
+  console.log('✓ Admin Console & Governance Tests passed.');
 
   console.log('\n=== All @kora/web Tests Completed Successfully! (100% Coverage) ===');
 })();
