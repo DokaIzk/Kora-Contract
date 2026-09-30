@@ -2,6 +2,7 @@ import React from 'react';
 import { CurrencySwitcher } from '../localization/CurrencySwitcher';
 import { LocaleSwitcher } from '../localization/LocaleSwitcher';
 import { NotificationCenter } from '../notifications/NotificationCenter';
+import { WalletConnection } from '../wallet/WalletConnection';
 
 interface HeaderProps {
   onToggleMobileDrawer: () => void;
@@ -34,6 +35,7 @@ export const Header: React.FC<HeaderProps> = ({ onToggleMobileDrawer }) => {
       <div className="flex items-center space-x-2 sm:space-x-3">
         <CurrencySwitcher />
         <LocaleSwitcher />
+        <WalletConnection />
         <NotificationCenter />
       </div>
     </header>

@@ -6,6 +6,7 @@ import { LocaleProvider } from '../../context/LocaleContext';
 import { CurrencyProvider } from '../../context/CurrencyContext';
 import { NotificationProvider } from '../../context/NotificationContext';
 import { SimulationProvider } from '../../context/SimulationContext';
+import { WalletProvider } from '../../context/WalletContext';
 import { SimulationPreviewModal } from '../simulation/SimulationPreviewModal';
 import { InvoiceSubmissionFlow } from '../flows/InvoiceSubmissionFlow';
 import { MarketplaceBrowsingFlow } from '../flows/MarketplaceBrowsingFlow';
@@ -63,9 +64,11 @@ export const Layout: React.FC = () => (
   <LocaleProvider>
     <CurrencyProvider>
       <NotificationProvider>
-        <SimulationProvider>
-          <LayoutInner />
-        </SimulationProvider>
+        <WalletProvider expectedNetwork="testnet">
+          <SimulationProvider>
+            <LayoutInner />
+          </SimulationProvider>
+        </WalletProvider>
       </NotificationProvider>
     </CurrencyProvider>
   </LocaleProvider>

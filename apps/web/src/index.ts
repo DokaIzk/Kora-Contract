@@ -50,14 +50,10 @@ export * from './components/risk/RiskScoreVisualization';
 export * from './components/admin/AdminConsole';
 export * from './components/common/DataTable';
 
-// Marketplace
-export * from './components/marketplace/MarketplaceBrowser';
-export * from './components/marketplace/MarketplaceFilters';
-export * from './components/marketplace/ListingCard';
-export * from './components/marketplace/ListingTable';
-export * from './components/marketplace/FundingProgress';
-export * from './components/marketplace/EmptyResultState';
-export * from './components/marketplace/MarketplacePagination';
-export * from './components/marketplace/MarketplaceSortSelect';
-export * from './components/marketplace/UseMarketplaceFilters';
-export * from './components/marketplace/UseLivingFundingUpdates';
+// Wallet connection
+export * from './wallet/types';
+export * from './wallet/network';
+export * from './wallet/adapters';
+export * from './wallet/manager';
+export * from './context/WalletContext';
+export * from './components/wallet/WalletConnection';
