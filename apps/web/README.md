@@ -26,7 +26,26 @@ Responsive mobile-first user interface and front-end integration layer for Kora 
 - **Failure Blocking**: Blocks signature prompts when a transaction simulation fails or exceeds limits, preventing wasted gas and failed executions.
 - **Components**: `SimulationPreviewModal`, `SimulationResultView`, `SimulationContext`, `simulationService`.
 
-### 5. Wave Contributor Dashboard
+### 5. Unified Stellar Wallet Connection (`#774`)
+- **Adapters**: A shared `WalletAdapter` contract supports Freighter and Rabet without coupling consuming components to extension-specific APIs.
+- **Explicit states**: disconnected, connecting, connected, install-required, network-mismatch, and error are exposed through `WalletProvider` / `useWallet`.
+- **Network safety**: Known mainnet/testnet mismatches are surfaced before signing; an unknown wallet network fails closed instead of being treated as compatible.
+- **Session recovery**: Only the last wallet choice is persisted. Freighter can restore an already-authorized session without prompting; Rabet reconnect remains an explicit user action.
+- **Account changes**: Freighter wallet-change monitoring and Rabet `accountChanged` / `networkChanged` events update the active address/network mid-session.
+- **No secrets persisted**: Kora never stores wallet private keys, seed phrases, signed XDR, or account credentials in local storage.
+- **SDK handoff**: Configure the Kora SDK with its `TESTNET` or `MAINNET` network config matching the `WalletProvider expectedNetwork` value before enabling a signature flow.
+
+```tsx
+<WalletProvider expectedNetwork="testnet">
+  <WalletConnection />
+</WalletProvider>
+```
+
+If an extension is missing, `WalletConnection` renders the wallet's install link. If the wallet is on a different known network, it renders an alert instructing the user to switch networks before signing. Freighter uses the official `@stellar/freighter-api` package; Rabet uses its documented injected `window.rabet` provider.
+
+![Wallet connection states](./docs/wallet-connection-states.png)
+
+### 6. Wave Contributor Dashboard
 - **Public Transparency**: Tracks Wave-style contributor initiatives with full visibility from GitHub to on-chain payouts.
 - **Issue Tracking**: Real-time sync with GitHub issues, complexity-based points (Low: 50, Medium: 100, High: 200), status tracking.
 - **Payout Transparency**: Cross-references GitHub issues with on-chain treasury disbursements, shows transaction hashes.

@@ -47,3 +47,11 @@ export * from './components/flows/RepaymentFlow';
 export * from './components/risk/RiskScoreVisualization';
 export * from './components/admin/AdminConsole';
 export * from './components/common/DataTable';
+
+// Wallet connection
+export * from './wallet/types';
+export * from './wallet/network';
+export * from './wallet/adapters';
+export * from './wallet/manager';
+export * from './context/WalletContext';
+export * from './components/wallet/WalletConnection';
