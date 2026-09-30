@@ -7,6 +7,7 @@ export * from './types/risk';
 export * from './types/funding';
 export * from './types/admin';
 export * from './types/table';
+export * from './types/marketplace';
 
 // Services
 export * from './services/fxService';
@@ -15,6 +16,7 @@ export * from './services/simulationService';
 export * from './services/riskService';
 export * from './services/fundingService';
 export * from './services/adminService';
+export * from './services/marketplaceService';
 
 // Contexts
 export * from './context/LocaleContext';
@@ -47,3 +49,15 @@ export * from './components/flows/RepaymentFlow';
 export * from './components/risk/RiskScoreVisualization';
 export * from './components/admin/AdminConsole';
 export * from './components/common/DataTable';
+
+// Marketplace
+export * from './components/marketplace/MarketplaceBrowser';
+export * from './components/marketplace/MarketplaceFilters';
+export * from './components/marketplace/ListingCard';
+export * from './components/marketplace/ListingTable';
+export * from './components/marketplace/FundingProgress';
+export * from './components/marketplace/EmptyResultState';
+export * from './components/marketplace/MarketplacePagination';
+export * from './components/marketplace/MarketplaceSortSelect';
+export * from './components/marketplace/UseMarketplaceFilters';
+export * from './components/marketplace/UseLivingFundingUpdates';
