@@ -90,17 +90,17 @@ impl Protocol<'static> {
         let _ = access_control.try_initialize(&admin);
         let _ = invoice_nft.try_initialize(&admin, &ac_id);
         let _ = invoice_nft.try_set_risk_registry(&admin, &rr_id);
-        let _ = price_oracle.try_initialize(&admin);
+        let _ = price_oracle.try_initialize(&admin, &ac_id);
         let _ = treasury.try_initialize(&admin, &50u32);
         let _ = treasury.try_whitelist_token(&admin, &token);
         let _ = risk_registry.try_initialize(&admin, &nft_id, &token, &1_000_000i128, &5_000u32);
         let _ = pool.try_initialize(
-            &admin, &nft_id, &rr_id, &treasury_id, &ac_id, &200u32, &oracle_id, &10_000u32,
+            &admin, &nft_id, &rr_id, &treasury_id, &ac_id, &200u32, &oracle_id, &10_000u32, &86_400u64, &Address::generate(&env),
         );
         let _ = marketplace.try_initialize(
-            &admin, &nft_id, &pool_id, &treasury_id, &ac_id, &rr_id, &50u32,
+            &admin, &nft_id, &pool_id, &treasury_id, &ac_id, &oracle_id, &rr_id, &50u32, &0u32,
         );
-        let _ = marketplace.try_whitelist_token(&admin, &token);
+        let _ = marketplace.try_propose_token_whitelist(&admin, &token);
         let _ = invoice_nft.try_set_authorized_callers(&admin, &mp_id, &pool_id);
         let _ = price_oracle.try_set_price(
             &admin,

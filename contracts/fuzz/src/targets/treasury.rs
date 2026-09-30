@@ -11,12 +11,12 @@ enum Op {
     CollectFee { token: u8, amount: i128, atag: u8 },
     Withdraw { admin: u8, token: u8, recipient: u8, amount: i128, atag: u8 },
     EmergencyWithdraw { admin: u8, token: u8, recipient: u8 },
-    ProposeWithdrawalCap { admin: u8, cap: i128, ctag: u8 },
-    ExecuteWithdrawalCap { admin: u8 },
+    ProposeWithdrawalCap { admin: u8, token: u8, cap: i128, ctag: u8 },
+    ExecuteWithdrawalCap { admin: u8, token: u8 },
     Reads { token: u8 },
     ProposeUpgrade { admin: u8, hash: u8 },
     ExecuteUpgrade { admin: u8 },
-    GetAuditLog { page: u32, page_size: u32, ptag: u8, stag: u8 },
+    GetAuditLog { limit: u32, ltag: u8 },
 }
 
 pub fn run(data: &[u8]) {
@@ -48,14 +48,14 @@ pub fn run(data: &[u8]) {
             Op::EmergencyWithdraw { admin, token, recipient } => {
                 let _ = c.try_emergency_withdraw(&p.actor(admin), &p.actor(token), &p.actor(recipient));
             }
-            Op::ProposeWithdrawalCap { admin, cap, ctag } => {
-                let _ = c.try_propose_withdrawal_cap(&p.actor(admin), &gen::amount(cap, ctag));
+            Op::ProposeWithdrawalCap { admin, token, cap, ctag } => {
+                let _ = c.try_propose_withdrawal_cap(&p.actor(admin), &p.actor(token), &gen::amount(cap, ctag));
             }
-            Op::ExecuteWithdrawalCap { admin } => {
-                let _ = c.try_execute_withdrawal_cap(&p.actor(admin));
+            Op::ExecuteWithdrawalCap { admin, token } => {
+                let _ = c.try_execute_withdrawal_cap(&p.actor(admin), &p.actor(token));
             }
             Op::Reads { token } => {
-                let _ = c.try_get_withdrawal_cap();
+                let _ = c.try_get_withdrawal_cap(&p.actor(token));
                 let _ = c.try_get_fee_bps();
                 let _ = c.try_get_balance(&p.actor(token));
                 let _ = c.try_get_collected(&p.actor(token));
@@ -67,8 +67,8 @@ pub fn run(data: &[u8]) {
             Op::ExecuteUpgrade { admin } => {
                 let _ = c.try_execute_upgrade(&p.actor(admin));
             }
-            Op::GetAuditLog { page, page_size, ptag, stag } => {
-                let _ = c.try_get_audit_log(&gen::small_u32(page, ptag), &gen::small_u32(page_size, stag));
+            Op::GetAuditLog { limit, ltag } => {
+                let _ = c.try_get_audit_log(&gen::small_u32(limit, ltag));
             }
         }
     });
