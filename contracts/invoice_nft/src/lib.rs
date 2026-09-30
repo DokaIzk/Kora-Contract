@@ -67,6 +67,13 @@ pub enum InvoiceNftError {
     UpgradeTimelockNotElapsed = 23,
     MintRateLimitExceeded = 24,
     InvalidParameterValue = 25,
+    InvalidMigrationTarget = 26,
+}
+
+impl From<kora_shared::migration::MigrationError> for InvoiceNftError {
+    fn from(_: kora_shared::migration::MigrationError) -> Self {
+        InvoiceNftError::InvalidMigrationTarget
+    }
 }
 
 impl From<CommonError> for InvoiceNftError {
@@ -114,6 +121,7 @@ impl From<InvoiceNftError> for KoraError {
             InvoiceNftError::UpgradeTimelockNotElapsed => KoraError::UpgradeTimelockNotElapsed,
             InvoiceNftError::MintRateLimitExceeded => KoraError::MintRateLimitExceeded,
             InvoiceNftError::InvalidParameterValue => KoraError::InvalidParameterValue,
+            InvoiceNftError::InvalidMigrationTarget => KoraError::InvalidParameterValue,
         }
     }
 }
@@ -169,95 +177,6 @@ const PERSISTENT_TTL_BUMP: u32 = 518_400;
 
 /// Maximum invoice IDs returned per `get_sme_invoice_ids` page.
 const MAX_SME_INVOICE_PAGE: u32 = 100;
-
-// ── Storage Keys ────────────────────────────────────────────────────────────
-//
-// Storage versioning: The contract uses a MigrationVersion key to track schema changes.
-// Current version: 2 (Invoice includes `metadata_hash` and `notes`)
-//
-// Variants:
-// - Invoice(u64): Stores individual Invoice structs by ID (persistent)
-// - NextId: Stores the next invoice ID to mint (instance)
-// - Admin: Stores admin address (instance)
-// - AccessControl: Stores access control contract address (instance)
-// - MigrationVersion: Tracks current schema version for upgrade safety (instance)
-
-/// Storage key variants for the invoice NFT contract.
-///
-/// - `Invoice(u64)` — Maps invoice ID to the full `Invoice` struct (persistent)
-/// - `NextId` — Stores the next invoice ID to be allocated (instance)
-/// - `Admin` — Stores the contract admin address (instance)
-/// - `AccessControl` — Stores the access control contract address (instance)
-/// - `InvoiceCount` — Stores total invoice count for metrics (instance)
-/// - `MigrationVersion` — Tracks current schema version for upgrade safety (instance)
-/// - `CurrencyAllowlist(Symbol)` — Marks a currency symbol as allowed (persistent)
-#[contracttype]
-pub enum DataKey {
-    /// Versioned invoice storage: Invoice(id) stores Invoice struct
-    Invoice(u64),
-    /// Instance key: tracks next invoice ID to assign
-    NextId,
-    /// Instance key: admin address for privileged operations
-    Admin,
-    /// Instance key: pending new admin address (two-step transfer)
-    PendingAdmin,
-    /// Instance key: access control contract address for pause checks
-    AccessControl,
-    /// Instance key: current schema migration version (starts at 1)
-    MigrationVersion,
-    /// Pending upgrade proposal: (wasm_hash, proposed_at_timestamp).
-    UpgradeProposal,
-    /// Instance key: authorized marketplace contract address
-    Marketplace,
-    /// Instance key: authorized financing pool contract address
-    FinancingPool,
-    /// Instance key: authorized risk registry contract address
-    RiskRegistry,
-    /// Persistent: aggregate exposure (i128) for an investor address
-    OutstandingExposure(Address),
-    /// Persistent: marks a currency symbol as allowed for invoices
-    CurrencyAllowlist(Symbol),
-    /// Persistent bool: true when this invoice is individually frozen by an admin.
-    /// Checked by marketplace.fund_invoice and financing_pool.repay in addition
-    /// to the protocol-wide pause, enabling targeted freeze of disputed invoices.
-    InvoiceFrozen(u64),
-    /// Instance key: protocol-wide configuration (fee_bps, max_risk_score, etc).
-    /// Defaults apply when unset (see `get_protocol_config`).
-    ProtocolConfig,
-    /// Persistent: an open or resolved metadata-hash dispute for an invoice.
-    MetadataDispute(u64),
-    /// Persistent: bounded ring-buffer history of prior IPFS CIDs for an invoice.
-    MetadataCidHistory(u64),
-    /// Instance key: next write position in the admin audit ring buffer.
-    AuditLogHead,
-    /// Instance key: total admin actions ever recorded (monotonic).
-    AuditLogTotal,
-    /// Persistent: an audit log entry at ring-buffer position `n`.
-    AuditEntry(u64),
-    /// Per-risk-tier face-value bounds for invoice minting/listing.
-    AmountBounds(kora_shared::types::RiskTier),
-    /// Persistent: Vec<u64> of invoice IDs minted by this SME, in mint order.
-    /// Appended to in mint_invoice/mint_invoices_batch, pruned in withdraw_invoice.
-    SmeInvoiceIds(Address),
-    /// Instance key: monotonic counter allocating the next batch-mint correlation ID.
-    NextBatchId,
-    /// Instance key: `MintRateLimit` config. Absent means minting is unthrottled,
-    /// preserving pre-existing behaviour for deployments that never configure it.
-    MintRateLimit,
-    /// Persistent: `(window_start_ts, mints_used)` rolling mint window for an SME.
-    SmeMintWindow(Address),
-}
-
-/// A dispute raised against an invoice's committed `metadata_hash`.
-#[contracttype]
-#[derive(Clone)]
-pub struct MetadataDispute {
-    pub challenger: Address,
-    pub evidence_hash: Bytes,
-    pub raised_at: u64,
-    pub resolved: bool,
-    pub upheld: bool,
-}
 
 /// Maximum number of historical metadata CID entries retained per invoice.
 pub const MAX_METADATA_CID_HISTORY: u32 = 20;
@@ -325,6 +244,8 @@ pub enum DataKey {
     SmeMintWindow(Address),
     /// Bounded history of prior IPFS CIDs for an invoice.
     MetadataCidHistory(u64),
+    /// Invoice ID of the first invoice ever minted by an SME (set once, never updated).
+    FirstMint(Address),
 
     // ── Legacy (migration only) ───────────────────────────────────────────────
     /// v1/v2 full Invoice struct — read during migrate() v2→v3, then removed.
@@ -485,40 +406,39 @@ impl InvoiceNftContract {
         //   1. Read each record as InvoiceV1 (the old encoding).
         //   2. Re-encode it as Invoice (v2) with notes = None.
         //   3. Overwrite the slot so future reads use the new codec.
-            let next_id: u64 = env
-                .storage()
-                .instance()
-                .get(&DataKey::NextId)
-                .unwrap_or(1);
+        let next_id: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::NextId)
+            .unwrap_or(1);
 
-            // Iterate every allocated invoice ID and backfill.
-            let mut id: u64 = 1;
-            while id < next_id {
-                let key = DataKey::Invoice(id);
-                if let Some(old) = env.storage().persistent().get::<DataKey, InvoiceV1>(&key) {
-                    let upgraded = Invoice {
-                        id: old.id,
-                        sme: old.sme,
-                        debtor_hash: old.debtor_hash,
-                        amount: old.amount,
-                        currency: old.currency,
-                        due_date: old.due_date,
-                        ipfs_cid: old.ipfs_cid,
-                        metadata_hash: Bytes::new(&env),
-                        risk_score: old.risk_score,
-                        risk_tier: old.risk_tier,
-                        status: old.status,
-                        created_at: old.created_at,
-                        funded_at: old.funded_at,
-                        repaid_at: old.repaid_at,
-                        notes: None,
-                    };
-                    env.storage().persistent().set(&key, &upgraded);
-                }
-                id += 1;
+        // Iterate every allocated invoice ID and backfill.
+        let mut id: u64 = 1;
+        while id < next_id {
+            let key = DataKey::Invoice(id);
+            if let Some(old) = env.storage().persistent().get::<DataKey, InvoiceV1>(&key) {
+                let upgraded = Invoice {
+                    id: old.id,
+                    sme: old.sme,
+                    debtor_hash: old.debtor_hash,
+                    amount: old.amount,
+                    currency: old.currency,
+                    due_date: old.due_date,
+                    ipfs_cid: old.ipfs_cid,
+                    metadata_hash: Bytes::new(&env),
+                    risk_score: old.risk_score,
+                    risk_tier: old.risk_tier,
+                    status: old.status,
+                    created_at: old.created_at,
+                    funded_at: old.funded_at,
+                    repaid_at: old.repaid_at,
+                    notes: None,
+                };
+                env.storage().persistent().set(&key, &upgraded);
             }
-            env.storage().instance().set(&DataKey::MigrationVersion, &2u32);
+            id += 1;
         }
+        env.storage().instance().set(&DataKey::MigrationVersion, &2u32);
 
         Ok(())
     }
@@ -693,7 +613,7 @@ impl InvoiceNftContract {
 
         let tier = RiskTier::from_score(risk_score);
         if let Some(bounds) = env.storage().instance().get::<DataKey, AmountBounds>(&DataKey::AmountBounds(tier.clone())) {
-            require_amount_within_bounds(amount, bounds.max)?;
+            require_amount_within_bounds(amount, bounds.min, bounds.max)?;
         }
 
         require_non_empty_bytes(&debtor_hash)?;
@@ -891,7 +811,7 @@ impl InvoiceNftContract {
         if hot.status != InvoiceStatus::Created {
             return Err(InvoiceNftError::InvalidInvoiceStatus);
         }
-        if invoice.sme != sme {
+        if hot.sme != sme {
             return Err(InvoiceNftError::Unauthorized);
         }
 
@@ -944,7 +864,7 @@ impl InvoiceNftContract {
             .get(&history_key)
             .unwrap_or_else(|| Vec::new(&env));
 
-        if history.len() >= capacity {
+        if history.len() >= MAX_METADATA_CID_HISTORY {
             history.remove(0);
         }
         history.push_back(cold.ipfs_cid.clone());
@@ -974,7 +894,7 @@ impl InvoiceNftContract {
         if hot.status != InvoiceStatus::Created {
             return Err(InvoiceNftError::InvalidInvoiceStatus);
         }
-        if invoice.sme != sme {
+        if hot.sme != sme {
             return Err(InvoiceNftError::Unauthorized);
         }
 
@@ -1539,6 +1459,22 @@ impl InvoiceNftContract {
             amount: None,
         };
 
+        env.storage()
+            .persistent()
+            .set(&DataKey::AuditEntry(head), &entry);
+        Self::bump_persistent(env, &DataKey::AuditEntry(head));
+
+        events::admin_action_audited(env, &entry);
+
+        let next_head = (head + 1) % MAX_AUDIT_LOG_SIZE;
+        env.storage()
+            .instance()
+            .set(&DataKey::AuditLogHead, &next_head);
+        env.storage()
+            .instance()
+            .set(&DataKey::AuditLogTotal, &(total + 1));
+    }
+
     fn load_hot(env: &Env, id: u64) -> Result<InvoiceHot, InvoiceNftError> {
         env.storage()
             .persistent()
@@ -1832,118 +1768,6 @@ mod tests {
         let client = InvoiceNftContractClient::new(&env, &contract_id);
         let admin = Address::generate(&env);
         assert!(client.try_initialize(&admin, &admin).is_err());
-    }
-
-// ── Tests ─────────────────────────────────────────────────────────────────────
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use soroban_sdk::{
-        testutils::{Address as _, Ledger, LedgerInfo},
-        Bytes, BytesN, Env, String, Symbol, Vec,
-    };
-
-    fn setup() -> (Env, Address, InvoiceNftContractClient<'static>) {
-        let env = Env::default();
-        env.mock_all_auths();
-        env.ledger().set(LedgerInfo {
-            timestamp: 1_700_000_000,
-            protocol_version: 21,
-            sequence_number: 1,
-            network_id: Default::default(),
-            base_reserve: 10,
-            min_temp_entry_ttl: 1000,
-            min_persistent_entry_ttl: 1000,
-            max_entry_ttl: 100_000,
-        });
-        let ac_id = env.register_contract(None, kora_access_control::AccessControlContract);
-        let contract_id = env.register_contract(None, InvoiceNftContract);
-        let client = InvoiceNftContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        client.initialize(&admin, &ac_id);
-        (env, admin, client)
-    }
-
-    fn ipfs_cid(env: &Env) -> String {
-        String::from_str(env, "bafybeigdyrzt5sfp7udm7hu76uh7y26nf3efuylqabf3oclgtqy55fbzdi")
-    }
-
-    fn mint_default(env: &Env, client: &InvoiceNftContractClient, risk_score: u32) -> u64 {
-        let sme = Address::generate(env);
-        client.mint_invoice(
-            &sme,
-            &Bytes::from_slice(env, &[1u8; 32]),
-            &1_000_000_000i128,
-            &Symbol::new(env, "USDC"),
-            &(env.ledger().timestamp() + 86_400 * 30),
-            &ipfs_cid(env),
-            &risk_score,
-            &None,
-        )
-    }
-
-    fn mint_one(env: &Env, client: &InvoiceNftContractClient<'static>) -> u64 {
-        let sme = Address::generate(env);
-        client.mint_invoice(
-            &sme,
-            &Bytes::from_slice(env, &[0xABu8; 32]),
-            &1_000_000_000i128,
-            &Symbol::new(env, "USDC"),
-            &(env.ledger().timestamp() + 86_400 * 30),
-            &ipfs_cid(env),
-            &10u32,
-            &None,
-        )
-    }
-
-    fn batch_input(env: &Env, risk_score: u32) -> BatchInvoiceInput {
-        BatchInvoiceInput {
-            debtor_hash: Bytes::from_slice(env, &[9u8; 32]),
-            amount: 500_000_000i128,
-            currency: Symbol::new(env, "USDC"),
-            due_date: env.ledger().timestamp() + 86_400 * 30,
-            ipfs_cid: ipfs_cid(env),
-            risk_score,
-            notes: None,
-        }
-    }
-
-    fn advance(env: &Env, secs: u64) {
-        let ts = env.ledger().timestamp();
-        env.ledger().set_timestamp(ts + secs);
-    }
-
-    #[test]
-    fn test_initialize_success() {
-        let env = Env::default();
-        env.mock_all_auths();
-        let contract_id = env.register_contract(None, InvoiceNftContract);
-        let client = InvoiceNftContractClient::new(&env, &contract_id);
-        let admin = Address::generate(&env);
-        let ac = Address::generate(&env);
-        client.initialize(&admin, &ac);
-        assert_eq!(client.next_id(), 1);
-        assert_eq!(client.invoice_count(), 0);
-    }
-
-    #[test]
-    fn test_initialize_sets_migration_version_3() {
-        let (env, _admin, client) = setup();
-        let version: Option<u32> = env.as_contract(&client.address, || {
-            env.storage().instance().get(&DataKey::MigrationVersion)
-        });
-        assert_eq!(version, Some(3));
-    }
-
-    #[test]
-    fn test_initialize_already_initialized_fails() {
-        let (env, admin, client) = setup();
-        let ac = Address::generate(&env);
-        assert_eq!(
-            client.try_initialize(&admin, &ac).unwrap_err().unwrap(),
-            InvoiceNftError::AlreadyInitialized
-        );
     }
 
     #[test]

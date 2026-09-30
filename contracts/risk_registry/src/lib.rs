@@ -5,7 +5,7 @@ use kora_shared::{
     errors::{CommonError, KoraError},
     events,
     reentrancy::ReentrancyGuard,
-    types::{RiskTierDefinition, SmeProfile},
+    types::{RiskTier, RiskTierDefinition, SmeProfile},
     validation::{require_non_negative_amount, require_valid_risk_score, UPGRADE_TIMELOCK_DELAY},
 };
 use soroban_sdk::{
@@ -47,6 +47,12 @@ pub enum RiskRegistryError {
     // ── Circuit Breaker Errors ────────────────────────────────────────────────
     CircuitBreakerTripped = 25,
     BreakerNotConfigured = 26,
+    // ── Verifier Removal & Suspension Errors (Issue #739) ─────────────────────
+    InvalidStatusTransition = 27,
+    NoRemovalRequested = 28,
+    RemovalCooldownNotElapsed = 29,
+    VerifierSuspended = 30,
+    ReadditionCooldownNotElapsed = 31,
 }
 
 impl From<CommonError> for RiskRegistryError {
@@ -96,6 +102,10 @@ pub const VERIFIER_READD_COOLDOWN_SECS: u64 = 7 * 24 * 3_600; // 7 days
 /// Minimum seconds between consecutive updates to the same debtor's score by the same verifier.
 /// Prevents rapid manipulation immediately before a funding or default decision.
 pub const MIN_SCORE_UPDATE_INTERVAL: u64 = 3_600; // 1 hour
+
+// Maximum number of distinct verifiers allowed to attest a single debtor's risk
+// score, bounding the unbounded-Vec DoS surface in get_debtor_score aggregation.
+const MAX_VERIFIERS_PER_DEBTOR: u32 = 50;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 

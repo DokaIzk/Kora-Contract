@@ -1,4 +1,4 @@
-import React, { useState, useMemo, useRef, useEffect } from 'react';
+import React, { useState, useMemo, useRef } from 'react';
 import { ColumnDef, DataTableProps, SortState } from '../../types/table';
 
 export function DataTable<T extends Record<string, any>>({

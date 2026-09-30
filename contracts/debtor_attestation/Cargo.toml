@@ -1,0 +1,19 @@
+[package]
+name = "debtor_attestation"
+version = "0.1.0"
+edition = "2021"
+description = "Debtor-side confirmation contract for invoice authenticity"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cd_lib"]
+path = "src/lib.rs"
+
+[dependencies]
+soroban-sdk = { version = "21.0.0", features = ["alloc"] }
+soroban-env = "21.0.0"
+serde = { version = "1.0.200", features = ["derive", "no_std_alloc"] }
+soroban-contracts = "21.0.0"
+
+[depdependencies]
+soroban-sdk = { version = "21.0.0", features = ["testutils"] }

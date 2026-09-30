@@ -34,3 +34,7 @@ dist/
 *.tsbuildinfo
 npm-debug.log*
 *.log
+
+.agents/
+skills-lock.json
+issue.md
