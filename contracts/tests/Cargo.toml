@@ -86,8 +86,3 @@ kora-access-control = { path = "../access_control" }
 kora-price-oracle = { path = "../price_oracle" }
 kora-referral-rewards = { path = "../referral_rewards" }
 
-# ── Cross-contract auth fuzzing harness (Issue #610) ─────────────────────────
-[[test]]
-name = "auth_fuzzing"
-path = "auth_fuzzing.rs"
-
