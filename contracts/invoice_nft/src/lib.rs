@@ -67,6 +67,7 @@ pub enum InvoiceNftError {
     UpgradeTimelockNotElapsed = 23,
     MintRateLimitExceeded = 24,
     InvalidParameterValue = 25,
+    InvalidMigrationTarget = 30,
 }
 
 impl From<CommonError> for InvoiceNftError {
@@ -187,80 +188,7 @@ const MAX_SME_INVOICE_PAGE: u32 = 100;
 /// - `Invoice(u64)` — Maps invoice ID to the full `Invoice` struct (persistent)
 /// - `NextId` — Stores the next invoice ID to be allocated (instance)
 /// - `Admin` — Stores the contract admin address (instance)
-/// - `AccessControl` — Stores the access control contract address (instance)
-/// - `InvoiceCount` — Stores total invoice count for metrics (instance)
-/// - `MigrationVersion` — Tracks current schema version for upgrade safety (instance)
-/// - `CurrencyAllowlist(Symbol)` — Marks a currency symbol as allowed (persistent)
-#[contracttype]
-pub enum DataKey {
-    /// Versioned invoice storage: Invoice(id) stores Invoice struct
-    Invoice(u64),
-    /// Instance key: tracks next invoice ID to assign
-    NextId,
-    /// Instance key: admin address for privileged operations
-    Admin,
-    /// Instance key: pending new admin address (two-step transfer)
-    PendingAdmin,
-    /// Instance key: access control contract address for pause checks
-    AccessControl,
-    /// Instance key: current schema migration version (starts at 1)
-    MigrationVersion,
-    /// Pending upgrade proposal: (wasm_hash, proposed_at_timestamp).
-    UpgradeProposal,
-    /// Instance key: authorized marketplace contract address
-    Marketplace,
-    /// Instance key: authorized financing pool contract address
-    FinancingPool,
-    /// Instance key: authorized risk registry contract address
-    RiskRegistry,
-    /// Persistent: aggregate exposure (i128) for an investor address
-    OutstandingExposure(Address),
-    /// Persistent: marks a currency symbol as allowed for invoices
-    CurrencyAllowlist(Symbol),
-    /// Persistent bool: true when this invoice is individually frozen by an admin.
-    /// Checked by marketplace.fund_invoice and financing_pool.repay in addition
-    /// to the protocol-wide pause, enabling targeted freeze of disputed invoices.
-    InvoiceFrozen(u64),
-    /// Instance key: protocol-wide configuration (fee_bps, max_risk_score, etc).
-    /// Defaults apply when unset (see `get_protocol_config`).
-    ProtocolConfig,
-    /// Persistent: an open or resolved metadata-hash dispute for an invoice.
-    MetadataDispute(u64),
-    /// Persistent: bounded ring-buffer history of prior IPFS CIDs for an invoice.
-    MetadataCidHistory(u64),
-    /// Instance key: next write position in the admin audit ring buffer.
-    AuditLogHead,
-    /// Instance key: total admin actions ever recorded (monotonic).
-    AuditLogTotal,
-    /// Persistent: an audit log entry at ring-buffer position `n`.
-    AuditEntry(u64),
-    /// Per-risk-tier face-value bounds for invoice minting/listing.
-    AmountBounds(kora_shared::types::RiskTier),
-    /// Persistent: Vec<u64> of invoice IDs minted by this SME, in mint order.
-    /// Appended to in mint_invoice/mint_invoices_batch, pruned in withdraw_invoice.
-    SmeInvoiceIds(Address),
-    /// Instance key: monotonic counter allocating the next batch-mint correlation ID.
-    NextBatchId,
-    /// Instance key: `MintRateLimit` config. Absent means minting is unthrottled,
-    /// preserving pre-existing behaviour for deployments that never configure it.
-    MintRateLimit,
-    /// Persistent: `(window_start_ts, mints_used)` rolling mint window for an SME.
-    SmeMintWindow(Address),
-}
 
-/// A dispute raised against an invoice's committed `metadata_hash`.
-#[contracttype]
-#[derive(Clone)]
-pub struct MetadataDispute {
-    pub challenger: Address,
-    pub evidence_hash: Bytes,
-    pub raised_at: u64,
-    pub resolved: bool,
-    pub upheld: bool,
-}
-
-/// Maximum number of historical metadata CID entries retained per invoice.
-pub const MAX_METADATA_CID_HISTORY: u32 = 20;
 
 // ── Storage Keys ──────────────────────────────────────────────────────────────
 //
@@ -325,6 +253,8 @@ pub enum DataKey {
     SmeMintWindow(Address),
     /// Bounded history of prior IPFS CIDs for an invoice.
     MetadataCidHistory(u64),
+    /// First mint tracking for SME.
+    FirstMint(Address),
 
     // ── Legacy (migration only) ───────────────────────────────────────────────
     /// v1/v2 full Invoice struct — read during migrate() v2→v3, then removed.
@@ -518,7 +448,6 @@ impl InvoiceNftContract {
                 id += 1;
             }
             env.storage().instance().set(&DataKey::MigrationVersion, &2u32);
-        }
 
         Ok(())
     }
@@ -693,7 +622,7 @@ impl InvoiceNftContract {
 
         let tier = RiskTier::from_score(risk_score);
         if let Some(bounds) = env.storage().instance().get::<DataKey, AmountBounds>(&DataKey::AmountBounds(tier.clone())) {
-            require_amount_within_bounds(amount, bounds.max)?;
+            require_amount_within_bounds(amount, bounds.min, bounds.max)?;
         }
 
         require_non_empty_bytes(&debtor_hash)?;
@@ -891,7 +820,7 @@ impl InvoiceNftContract {
         if hot.status != InvoiceStatus::Created {
             return Err(InvoiceNftError::InvalidInvoiceStatus);
         }
-        if invoice.sme != sme {
+        if hot.sme != sme {
             return Err(InvoiceNftError::Unauthorized);
         }
 
@@ -944,7 +873,7 @@ impl InvoiceNftContract {
             .get(&history_key)
             .unwrap_or_else(|| Vec::new(&env));
 
-        if history.len() >= capacity {
+        if history.len() >= MAX_METADATA_CID_HISTORY {
             history.remove(0);
         }
         history.push_back(cold.ipfs_cid.clone());
@@ -974,7 +903,7 @@ impl InvoiceNftContract {
         if hot.status != InvoiceStatus::Created {
             return Err(InvoiceNftError::InvalidInvoiceStatus);
         }
-        if invoice.sme != sme {
+        if hot.sme != sme {
             return Err(InvoiceNftError::Unauthorized);
         }
 
@@ -1538,6 +1467,22 @@ impl InvoiceNftContract {
             token: None,
             amount: None,
         };
+
+        env.storage()
+            .persistent()
+            .set(&DataKey::AuditEntry(head), &entry);
+        Self::bump_persistent(env, &DataKey::AuditEntry(head));
+
+        events::admin_action_audited(env, &entry);
+
+        let next_head = (head + 1) % MAX_AUDIT_LOG_SIZE;
+        env.storage()
+            .instance()
+            .set(&DataKey::AuditLogHead, &next_head);
+        env.storage()
+            .instance()
+            .set(&DataKey::AuditLogTotal, &(total + 1));
+    }
 
     fn load_hot(env: &Env, id: u64) -> Result<InvoiceHot, InvoiceNftError> {
         env.storage()
@@ -2741,4 +2686,5 @@ mod tests {
             InvoiceStatus::Listed
         );
     }
+}
 }

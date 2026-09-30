@@ -80,6 +80,7 @@ pub enum KoraError {
     EmptyBytes = 97,
     Reentrancy = 98,
     InvalidLength = 99,
+    InvalidParameterValue = 135,
     FieldTooLong = 102,
 
     // Upgrade

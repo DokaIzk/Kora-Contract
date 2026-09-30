@@ -37,6 +37,7 @@ pub enum PriceOracleError {
     PriceHistoryNotAvailable = 14,
     AllFeedsStale = 15,
     FallbackNotConfigured = 16,
+    RateChangeExceeded = 17,
 }
 
 #[contracttype]
