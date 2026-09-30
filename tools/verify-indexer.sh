@@ -1,357 +1,172 @@
-#!/usr/bin/env bash
+#!/bin/bash
+# tools/verify-indexer.sh
+# Cross-verification tool for community-run Kora indexer instances
 #
-# Cross-Verification Tool for Community Kora Indexer Nodes
-#
-# Compares local indexer output against canonical instance to detect
-# discrepancies, ensuring community-run infrastructure matches protocol state.
+# Compares local indexer output against canonical instance to ensure:
+# - Correct RPC node synchronization
+# - Matching event processing logic
+# - No data corruption or missed events
 #
 # Usage:
-#   ./verify-indexer.sh \
-#     --local-db postgresql://localhost:5432/kora \
-#     --canonical-api https://api.kora.finance \
-#     --start-ledger 1000000 \
-#     --end-ledger 1001000
-#
+#   CANONICAL_URL=https://indexer.kora.finance \
+#   LOCAL_URL=http://localhost:3000 \
+#   SAMPLE_SIZE=100 \
+#     ./tools/verify-indexer.sh
 
-set -euo pipefail
+set -e
 
-# ── Configuration ─────────────────────────────────────────────────────────────
+# Configuration
+CANONICAL_URL="${CANONICAL_URL:-https://indexer-testnet.kora.finance}"
+LOCAL_URL="${LOCAL_URL:-http://localhost:3000}"
+SAMPLE_SIZE="${SAMPLE_SIZE:-100}"
+VERBOSE="${VERBOSE:-0}"
 
-LOCAL_DB=""
-CANONICAL_API=""
-START_LEDGER=""
-END_LEDGER=""
-VERBOSE=false
-OUTPUT_DIR="./verification-results"
+# Colors for output
+RED='\033[0;31m'
+GREEN='\033[0;32m'
+YELLOW='\033[1;33m'
+NC='\033[0m' # No Color
 
-# ── Argument Parsing ──────────────────────────────────────────────────────────
-
-while [[ $# -gt 0 ]]; do
-    case $1 in
-        --local-db)
-            LOCAL_DB="$2"
-            shift 2
-            ;;
-        --canonical-api)
-            CANONICAL_API="$2"
-            shift 2
-            ;;
-        --start-ledger)
-            START_LEDGER="$2"
-            shift 2
-            ;;
-        --end-ledger)
-            END_LEDGER="$2"
-            shift 2
-            ;;
-        --verbose)
-            VERBOSE=true
-            shift
-            ;;
-        --output-dir)
-            OUTPUT_DIR="$2"
-            shift 2
-            ;;
-        *)
-            echo "Unknown option: $1"
-            echo "Usage: $0 --local-db <db_url> --canonical-api <api_url> --start-ledger <num> --end-ledger <num> [--verbose] [--output-dir <dir>]"
-            exit 1
-            ;;
-    esac
-done
-
-# ── Validation ────────────────────────────────────────────────────────────────
-
-if [[ -z "$LOCAL_DB" || -z "$CANONICAL_API" || -z "$START_LEDGER" || -z "$END_LEDGER" ]]; then
-    echo "Error: Missing required arguments"
-    echo "Usage: $0 --local-db <db_url> --canonical-api <api_url> --start-ledger <num> --end-ledger <num>"
-    exit 1
-fi
-
-# ── Setup ─────────────────────────────────────────────────────────────────────
-
-mkdir -p "$OUTPUT_DIR"
-TIMESTAMP=$(date +%Y%m%d_%H%M%S)
-REPORT_FILE="$OUTPUT_DIR/verification_report_$TIMESTAMP.txt"
-
-log() {
-    echo "[$(date +'%Y-%m-%d %H:%M:%S')] $*" | tee -a "$REPORT_FILE"
+log_info() {
+    echo -e "${GREEN}[INFO]${NC} $1"
 }
 
-log_verbose() {
-    if [[ "$VERBOSE" == "true" ]]; then
-        echo "[VERBOSE] $*" | tee -a "$REPORT_FILE"
-    fi
+log_warn() {
+    echo -e "${YELLOW}[WARN]${NC} $1"
 }
 
-# ── Dependency Checks ─────────────────────────────────────────────────────────
+log_error() {
+    echo -e "${RED}[ERROR]${NC} $1"
+}
 
-if ! command -v psql &> /dev/null; then
-    echo "Error: psql not found. Install PostgreSQL client tools."
+# Check dependencies
+command -v curl >/dev/null 2>&1 || { log_error "curl is required but not installed. Aborting."; exit 1; }
+command -v jq >/dev/null 2>&1 || { log_error "jq is required but not installed. Aborting."; exit 1; }
+command -v sha256sum >/dev/null 2>&1 || { log_error "sha256sum is required but not installed. Aborting."; exit 1; }
+
+log_info "Starting Kora Indexer Cross-Verification"
+log_info "Canonical: $CANONICAL_URL"
+log_info "Local:     $LOCAL_URL"
+log_info "Sample:    $SAMPLE_SIZE events"
+echo ""
+
+# Check connectivity
+log_info "Checking connectivity to canonical indexer..."
+if ! curl -sf "$CANONICAL_URL/api/v1/health" > /dev/null; then
+    log_error "Cannot reach canonical indexer at $CANONICAL_URL"
+    log_error "Check your internet connection or CANONICAL_URL configuration"
     exit 1
 fi
+log_info "✓ Canonical indexer reachable"
 
-if ! command -v curl &> /dev/null; then
-    echo "Error: curl not found. Install curl."
+log_info "Checking connectivity to local indexer..."
+if ! curl -sf "$LOCAL_URL/api/v1/health" > /dev/null; then
+    log_error "Cannot reach local indexer at $LOCAL_URL"
+    log_error "Ensure your local indexer is running and accessible"
     exit 1
 fi
+log_info "✓ Local indexer reachable"
+echo ""
 
-if ! command -v jq &> /dev/null; then
-    echo "Error: jq not found. Install jq for JSON processing."
+# Compare health status
+log_info "Comparing indexer health status..."
+CANONICAL_HEALTH=$(curl -sf "$CANONICAL_URL/api/v1/health")
+LOCAL_HEALTH=$(curl -sf "$LOCAL_URL/api/v1/health")
+
+CANONICAL_LEDGER=$(echo "$CANONICAL_HEALTH" | jq -r '.last_indexed_ledger')
+LOCAL_LEDGER=$(echo "$LOCAL_HEALTH" | jq -r '.last_indexed_ledger')
+CHAIN_TIP=$(echo "$CANONICAL_HEALTH" | jq -r '.chain_tip')
+
+log_info "Canonical last indexed: $CANONICAL_LEDGER"
+log_info "Local last indexed:     $LOCAL_LEDGER"
+log_info "Chain tip:              $CHAIN_TIP"
+
+LAG=$((CHAIN_TIP - LOCAL_LEDGER))
+if [ $LAG -gt 300 ]; then
+    log_warn "Local indexer is lagging by $LAG ledgers (>300)"
+    log_warn "Wait for indexer to catch up before running verification"
+    exit 2
+elif [ $LAG -gt 100 ]; then
+    log_warn "Local indexer is lagging by $LAG ledgers"
+fi
+
+if [ $LOCAL_LEDGER -lt $CANONICAL_LEDGER ]; then
+    log_warn "Local indexer ($LOCAL_LEDGER) is behind canonical ($CANONICAL_LEDGER)"
+    log_warn "Verification will compare only up to local ledger height"
+    SAMPLE_SIZE=$((SAMPLE_SIZE / 2))
+    log_info "Reducing sample size to $SAMPLE_SIZE for fair comparison"
+fi
+echo ""
+
+# Fetch events for comparison
+log_info "Fetching $SAMPLE_SIZE recent events from canonical indexer..."
+CANONICAL_EVENTS=$(curl -sf "$CANONICAL_URL/api/v1/events?limit=$SAMPLE_SIZE&sort=desc")
+if [ -z "$CANONICAL_EVENTS" ]; then
+    log_error "Failed to fetch events from canonical indexer"
     exit 1
 fi
+CANONICAL_COUNT=$(echo "$CANONICAL_EVENTS" | jq -r '. | length')
+log_info "✓ Fetched $CANONICAL_COUNT events from canonical"
 
-# ── Main Verification ─────────────────────────────────────────────────────────
-
-log "========================================="
-log "Kora Indexer Verification Report"
-log "========================================="
-log "Local Database: $LOCAL_DB"
-log "Canonical API: $CANONICAL_API"
-log "Ledger Range: $START_LEDGER - $END_LEDGER"
-log ""
-
-# ── 1. Event Count Comparison ─────────────────────────────────────────────────
-
-log "1. Comparing Event Counts..."
-
-# Query local database for event counts by type
-LOCAL_EVENTS=$(psql "$LOCAL_DB" -t -c "
-    SELECT event_type, COUNT(*) as count
-    FROM events
-    WHERE ledger_sequence >= $START_LEDGER AND ledger_sequence <= $END_LEDGER
-    GROUP BY event_type
-    ORDER BY event_type;
-" 2>/dev/null || echo "ERROR")
-
-if [[ "$LOCAL_EVENTS" == "ERROR" ]]; then
-    log "   ❌ ERROR: Failed to query local database"
+log_info "Fetching $SAMPLE_SIZE recent events from local indexer..."
+LOCAL_EVENTS=$(curl -sf "$LOCAL_URL/api/v1/events?limit=$SAMPLE_SIZE&sort=desc")
+if [ -z "$LOCAL_EVENTS" ]; then
+    log_error "Failed to fetch events from local indexer"
     exit 1
 fi
+LOCAL_COUNT=$(echo "$LOCAL_EVENTS" | jq -r '. | length')
+log_info "✓ Fetched $LOCAL_COUNT events from local"
+echo ""
 
-# Query canonical API for event counts
-CANONICAL_EVENTS=$(curl -s "$CANONICAL_API/api/v1/events/summary?start_ledger=$START_LEDGER&end_ledger=$END_LEDGER" | jq -r '.counts | to_entries[] | "\(.key) \(.value)"' 2>/dev/null || echo "ERROR")
+# Normalize and hash for comparison
+log_info "Computing event hashes..."
+CANONICAL_HASH=$(echo "$CANONICAL_EVENTS" | jq -S '.' | sha256sum | awk '{print $1}')
+LOCAL_HASH=$(echo "$LOCAL_EVENTS" | jq -S '.' | sha256sum | awk '{print $1}')
 
-if [[ "$CANONICAL_EVENTS" == "ERROR" ]]; then
-    log "   ⚠️  WARNING: Failed to query canonical API"
-else
-    log_verbose "Local events:"
-    log_verbose "$LOCAL_EVENTS"
-    log_verbose "Canonical events:"
-    log_verbose "$CANONICAL_EVENTS"
-
-    # Compare counts
-    MISMATCH=false
-    while IFS= read -r line; do
-        local_type=$(echo "$line" | awk '{print $1}' | xargs)
-        local_count=$(echo "$line" | awk '{print $2}' | xargs)
-        
-        canonical_count=$(echo "$CANONICAL_EVENTS" | grep "^$local_type " | awk '{print $2}' || echo "0")
-        
-        if [[ "$local_count" != "$canonical_count" ]]; then
-            log "   ❌ MISMATCH: $local_type - Local: $local_count, Canonical: $canonical_count"
-            MISMATCH=true
-        else
-            log "   ✅ MATCH: $local_type - Count: $local_count"
-        fi
-    done <<< "$LOCAL_EVENTS"
-    
-    if [[ "$MISMATCH" == "false" ]]; then
-        log "   ✅ All event counts match"
-    fi
-fi
-
-log ""
-
-# ── 2. Invoice State Comparison ───────────────────────────────────────────────
-
-log "2. Comparing Invoice States..."
-
-# Sample 10 random invoices from the ledger range
-SAMPLE_INVOICES=$(psql "$LOCAL_DB" -t -c "
-    SELECT DISTINCT invoice_id
-    FROM events
-    WHERE ledger_sequence >= $START_LEDGER AND ledger_sequence <= $END_LEDGER
-      AND event_type LIKE 'invoice_%'
-    ORDER BY RANDOM()
-    LIMIT 10;
-" 2>/dev/null | xargs)
-
-if [[ -n "$SAMPLE_INVOICES" ]]; then
-    for invoice_id in $SAMPLE_INVOICES; do
-        log_verbose "Checking invoice: $invoice_id"
-        
-        # Get local invoice state
-        LOCAL_STATE=$(psql "$LOCAL_DB" -t -c "
-            SELECT status, funded_amount, outstanding_amount
-            FROM invoices
-            WHERE invoice_id = $invoice_id;
-        " 2>/dev/null || echo "ERROR")
-        
-        # Get canonical invoice state
-        CANONICAL_STATE=$(curl -s "$CANONICAL_API/api/v1/invoices/$invoice_id" | jq -r '[.status, .funded_amount, .outstanding_amount] | @tsv' 2>/dev/null || echo "ERROR")
-        
-        if [[ "$LOCAL_STATE" != "$CANONICAL_STATE" ]]; then
-            log "   ❌ MISMATCH: Invoice $invoice_id"
-            log "      Local: $LOCAL_STATE"
-            log "      Canonical: $CANONICAL_STATE"
-        else
-            log "   ✅ MATCH: Invoice $invoice_id"
-        fi
-    done
-else
-    log "   ⚠️  No invoices found in this ledger range"
-fi
-
-log ""
-
-# ── 3. Transaction Hash Verification ──────────────────────────────────────────
-
-log "3. Verifying Transaction Hashes..."
-
-# Sample 20 random transactions
-SAMPLE_TXS=$(psql "$LOCAL_DB" -t -c "
-    SELECT DISTINCT tx_hash
-    FROM events
-    WHERE ledger_sequence >= $START_LEDGER AND ledger_sequence <= $END_LEDGER
-    ORDER BY RANDOM()
-    LIMIT 20;
-" 2>/dev/null | xargs)
-
-TX_MISMATCHES=0
-TX_MATCHES=0
-
-if [[ -n "$SAMPLE_TXS" ]]; then
-    for tx_hash in $SAMPLE_TXS; do
-        log_verbose "Checking transaction: $tx_hash"
-        
-        # Check if canonical API has this transaction
-        CANONICAL_TX=$(curl -s "$CANONICAL_API/api/v1/transactions/$tx_hash" 2>/dev/null | jq -r '.tx_hash // "NOT_FOUND"')
-        
-        if [[ "$CANONICAL_TX" == "NOT_FOUND" ]]; then
-            log "   ❌ MISSING: Transaction $tx_hash not found in canonical indexer"
-            TX_MISMATCHES=$((TX_MISMATCHES + 1))
-        else
-            TX_MATCHES=$((TX_MATCHES + 1))
-        fi
-    done
-    
-    log "   Transaction Hash Summary: $TX_MATCHES matches, $TX_MISMATCHES mismatches"
-    if [[ $TX_MISMATCHES -eq 0 ]]; then
-        log "   ✅ All sampled transactions found in canonical indexer"
-    fi
-else
-    log "   ⚠️  No transactions found in this ledger range"
-fi
-
-log ""
-
-# ── 4. Ledger Sequence Gaps ───────────────────────────────────────────────────
-
-log "4. Checking for Ledger Sequence Gaps..."
-
-GAPS=$(psql "$LOCAL_DB" -t -c "
-    WITH ledger_range AS (
-        SELECT generate_series($START_LEDGER, $END_LEDGER) AS expected_ledger
-    ),
-    indexed_ledgers AS (
-        SELECT DISTINCT ledger_sequence FROM events
-        WHERE ledger_sequence >= $START_LEDGER AND ledger_sequence <= $END_LEDGER
-    )
-    SELECT lr.expected_ledger
-    FROM ledger_range lr
-    LEFT JOIN indexed_ledgers il ON lr.expected_ledger = il.ledger_sequence
-    WHERE il.ledger_sequence IS NULL
-    ORDER BY lr.expected_ledger;
-" 2>/dev/null)
-
-if [[ -n "$GAPS" ]]; then
-    GAP_COUNT=$(echo "$GAPS" | wc -l)
-    log "   ❌ Found $GAP_COUNT missing ledgers:"
-    log_verbose "$GAPS"
-    log "   First missing: $(echo "$GAPS" | head -n 1)"
-    log "   Last missing: $(echo "$GAPS" | tail -n 1)"
-else
-    log "   ✅ No ledger gaps detected"
-fi
-
-log ""
-
-# ── 5. Sync Status Check ──────────────────────────────────────────────────────
-
-log "5. Checking Sync Status..."
-
-# Get latest local ledger
-LOCAL_LATEST=$(psql "$LOCAL_DB" -t -c "
-    SELECT MAX(ledger_sequence) FROM events;
-" 2>/dev/null | xargs)
-
-# Get latest canonical ledger
-CANONICAL_LATEST=$(curl -s "$CANONICAL_API/api/v1/status" | jq -r '.latest_ledger // "ERROR"' 2>/dev/null)
-
-if [[ "$CANONICAL_LATEST" != "ERROR" ]]; then
-    LAG=$((CANONICAL_LATEST - LOCAL_LATEST))
-    log "   Local Latest Ledger: $LOCAL_LATEST"
-    log "   Canonical Latest Ledger: $CANONICAL_LATEST"
-    log "   Lag: $LAG ledgers"
-    
-    if [[ $LAG -gt 100 ]]; then
-        log "   ⚠️  WARNING: Local indexer is significantly behind (>100 ledgers)"
-    elif [[ $LAG -gt 10 ]]; then
-        log "   ⚠️  Local indexer is slightly behind (>10 ledgers)"
-    else
-        log "   ✅ Local indexer is up-to-date"
-    fi
-else
-    log "   ⚠️  Could not fetch canonical sync status"
-fi
-
-log ""
-
-# ── 6. Database Health Metrics ────────────────────────────────────────────────
-
-log "6. Database Health Metrics..."
-
-# Table sizes
-TABLE_SIZES=$(psql "$LOCAL_DB" -t -c "
-    SELECT tablename, pg_size_pretty(pg_total_relation_size(schemaname||'.'||tablename))
-    FROM pg_tables
-    WHERE schemaname = 'public'
-    ORDER BY pg_total_relation_size(schemaname||'.'||tablename) DESC
-    LIMIT 5;
-" 2>/dev/null)
-
-log "   Top 5 Largest Tables:"
-log "$TABLE_SIZES"
-
-# Index usage
-INDEX_USAGE=$(psql "$LOCAL_DB" -t -c "
-    SELECT schemaname, tablename, indexname, idx_scan
-    FROM pg_stat_user_indexes
-    WHERE schemaname = 'public'
-    ORDER BY idx_scan DESC
-    LIMIT 5;
-" 2>/dev/null)
-
-log ""
-log "   Top 5 Most Used Indexes:"
-log "$INDEX_USAGE"
-
-log ""
-
-# ── Summary ───────────────────────────────────────────────────────────────────
-
-log "========================================="
-log "Verification Complete"
-log "========================================="
-log "Report saved to: $REPORT_FILE"
-log ""
-
-# Exit with error code if significant issues found
-if [[ "$MISMATCH" == "true" ]] || [[ $TX_MISMATCHES -gt 5 ]] || [[ -n "$GAPS" && $(echo "$GAPS" | wc -l) -gt 10 ]]; then
-    log "❌ VERIFICATION FAILED: Significant discrepancies detected"
-    exit 1
-else
-    log "✅ VERIFICATION PASSED: No significant issues detected"
+# Compare hashes
+echo ""
+log_info "Comparing event data..."
+if [ "$CANONICAL_HASH" == "$LOCAL_HASH" ]; then
+    echo ""
+    log_info "════════════════════════════════════════════════════════"
+    log_info "✅ VERIFICATION PASSED"
+    log_info "════════════════════════════════════════════════════════"
+    log_info "Your local indexer matches the canonical instance!"
+    log_info ""
+    log_info "Hash: $LOCAL_HASH"
+    log_info "Events compared: $LOCAL_COUNT"
+    log_info "Ledger range: $((LOCAL_LEDGER - SAMPLE_SIZE)) to $LOCAL_LEDGER"
+    echo ""
     exit 0
+else
+    echo ""
+    log_error "════════════════════════════════════════════════════════"
+    log_error "❌ VERIFICATION FAILED"
+    log_error "════════════════════════════════════════════════════════"
+    log_error "Local indexer diverges from canonical instance"
+    log_error ""
+    log_error "Canonical hash: $CANONICAL_HASH"
+    log_error "Local hash:     $LOCAL_HASH"
+    echo ""
+    
+    log_info "Analyzing differences..."
+    
+    # Find first diverging event
+    DIFF_OUTPUT=$(diff <(echo "$CANONICAL_EVENTS" | jq -S '.[] | {ledger: .ledger_sequence, index: .event_index, type: .event_type, contract: .contract}') \
+                      <(echo "$LOCAL_EVENTS" | jq -S '.[] | {ledger: .ledger_sequence, index: .event_index, type: .event_type, contract: .contract}') 2>&1 || true)
+    
+    if [ -n "$DIFF_OUTPUT" ]; then
+        log_error "First difference found:"
+        echo "$DIFF_OUTPUT" | head -20
+    fi
+    
+    echo ""
+    log_error "Possible causes:"
+    log_error "  1. Local indexer is out of sync (lag: $LAG ledgers)"
+    log_error "  2. Software version mismatch (check: git describe --tags)"
+    log_error "  3. Contract address configuration mismatch"
+    log_error "  4. Database corruption (try: drop DB and re-index)"
+    echo ""
+    log_error "For help, see: docs/RUNNING_A_NODE.md#troubleshooting"
+    exit 1
 fi

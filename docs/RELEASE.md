@@ -382,3 +382,131 @@ sha256sum -c releases/vX.Y.Z.hashes
 ---
 
 *Last updated: 2026-06-27*
+
+
+---
+
+## Community Infrastructure Releases
+
+### Indexer Service Releases
+
+Community-run indexer instances should track stable releases to ensure compatibility with the canonical instance.
+
+**Release Artifacts:**
+- **Source code:** `services/indexer/`
+- **Deployment tooling:** `packaging/`
+- **Verification tool:** `tools/verify-indexer.sh`
+- **Documentation:** `docs/RUNNING_A_NODE.md`
+
+**Release Process:**
+
+1. **Version Alignment:** Indexer releases track contract releases (e.g., indexer v0.1.0 matches contracts v0.1.0)
+
+2. **Binary Compatibility:** The indexer's event schemas must match the contract ABIs for that version
+
+3. **Verification:** Before releasing, canonical indexer is cross-verified against contracts:
+   ```bash
+   # Verify indexer produces correct output for contract events
+   cargo test --package kora-indexer --all-features
+   ```
+
+4. **Community Notification:**
+   - Announce new indexer releases in Discord #infrastructure channel
+   - Document any breaking changes in event schemas
+   - Provide migration guide if database schema changes
+
+**Deployment Versioning:**
+
+```bash
+# Community operators should pin to specific versions
+cd /opt/kora
+git fetch --tags
+git checkout v0.1.0  # Pin to specific release
+cd services/indexer
+cargo build --release
+```
+
+**Upgrade Path:**
+
+1. **Check for breaking changes:**
+   ```bash
+   # Review changelog for indexer-specific changes
+   git log v0.1.0..v0.2.0 --oneline -- services/indexer/
+   ```
+
+2. **Test upgrade on testnet first:**
+   ```bash
+   # Stop testnet indexer
+   sudo systemctl stop kora-indexer-testnet
+   
+   # Upgrade code
+   cd /opt/kora
+   git pull origin main
+   git checkout v0.2.0
+   cd services/indexer
+   cargo build --release
+   
+   # Restart and verify
+   sudo systemctl start kora-indexer-testnet
+   ./tools/verify-indexer.sh
+   ```
+
+3. **Apply to mainnet after testnet validation:**
+   ```bash
+   sudo systemctl stop kora-indexer
+   # ... same upgrade steps ...
+   sudo systemctl start kora-indexer
+   ```
+
+**Cross-Verification Protocol:**
+
+After any indexer upgrade, community operators should verify against canonical:
+
+```bash
+# Run verification tool
+cd /opt/kora
+CANONICAL_URL=https://indexer.kora.finance \
+LOCAL_URL=http://localhost:3000 \
+SAMPLE_SIZE=1000 \
+  ./tools/verify-indexer.sh
+
+# Expected output: ✅ VERIFICATION PASSED
+```
+
+**Rollback Procedure:**
+
+If verification fails after upgrade:
+
+```bash
+# Stop service
+sudo systemctl stop kora-indexer
+
+# Rollback to previous version
+cd /opt/kora
+git checkout v0.1.0  # Previous stable version
+cd services/indexer
+cargo build --release
+
+# Restore database backup (if schema changed)
+sudo -u kora cp /opt/kora/backups/indexer_20260928.db \
+  /opt/kora/services/indexer/indexer.db
+
+# Restart and verify
+sudo systemctl start kora-indexer
+./tools/verify-indexer.sh
+```
+
+### RPC Node Compatibility
+
+Indexer releases are tested against specific Stellar/Soroban versions:
+
+| Indexer Version | Stellar Core | Soroban RPC | Notes |
+|-----------------|--------------|-------------|-------|
+| v0.1.0 | 21.0.0+ | 21.0.0+ | Initial release |
+| v0.2.0 | 21.2.0+ | 21.2.0+ | Requires updated event schemas |
+
+Community operators should ensure their RPC nodes meet minimum version requirements.
+
+---
+
+*Last updated: 2026-09-29*
