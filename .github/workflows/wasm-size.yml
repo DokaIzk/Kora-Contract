@@ -10,6 +10,9 @@ on:
 # Adjust per contract as needed.
 env:
   SIZE_THRESHOLD_BYTES: 10240
+  # Percentage growth in WASM size or estimated cost units that triggers the
+  # xtask regression guard.  Override per-PR with a workflow_dispatch input.
+  METRICS_THRESHOLD_PCT: 5
 
 jobs:
   wasm-size:
@@ -207,9 +210,16 @@ jobs:
               });
             }
 
+      - name: Enforce WASM size budgets
+        run: |
+          chmod +x scripts/check-wasm-size.sh
+          PR_LABELS="${{ join(github.event.pull_request.labels.*.name, ' ') }}"
+          ./scripts/check-wasm-size.sh wasm-budgets.json target/wasm32-unknown-unknown/release "$PR_LABELS"
+
       - name: Fail if size regression detected
         if: steps.report.outputs.failed == '1'
         run: |
           echo "One or more contracts exceeded the size-increase threshold of ${{ env.SIZE_THRESHOLD_BYTES }} bytes."
           echo "See the WASM Size Report in the workflow summary for details."
           exit 1
+

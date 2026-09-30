@@ -7,7 +7,6 @@ edition = "2021"
 crate-type = ["rlib"]
 
 # ── Integration test suites ───────────────────────────────────────────────────
-# Pre-existing edge-case suites
 [[test]]
 name = "financing_pool_edge_cases"
 path = "financing_pool_edge_cases.rs"
@@ -48,27 +47,32 @@ path = "issue_470_concentration_cap.rs"
 name = "issue_471_secondary_market_settlement"
 path = "issue_471_secondary_market_settlement.rs"
 
-# ── New security regression suites (#611–#614) ────────────────────────────────
-
-# #611 — Security regression tests sourced from AUDIT_LOG.md
+# ── Security regression suites (#611–#614) ────────────────────────────────────
 [[test]]
 name = "security_regression_audit_log"
 path = "security_regression_audit_log.rs"
 
-# #612 — DoS resistance: unbounded Vec growth (PriceFeeders, DebtorAttestors)
 [[test]]
 name = "dos_vec_growth"
 path = "dos_vec_growth.rs"
 
-# #613 — Timelock bypass regression (price_oracle upgrade, governance param change)
 [[test]]
 name = "timelock_bypass_regression"
 path = "timelock_bypass_regression.rs"
 
-# #614 — Multisig threshold manipulation (signer removed / threshold changed mid-flight)
 [[test]]
 name = "multisig_threshold_manipulation"
 path = "multisig_threshold_manipulation.rs"
+
+# ── Cross-contract auth fuzzing harness (Issue #610) ─────────────────────────
+[[test]]
+name = "auth_fuzzing"
+path = "auth_fuzzing.rs"
+
+# ── Economic attack simulation harness (Security hardening wave) ──────────────
+[[test]]
+name = "economic_attack_simulation"
+path = "economic_attack_simulation.rs"
 
 [dev-dependencies]
 soroban-sdk = { workspace = true, features = ["testutils"] }
@@ -80,6 +84,7 @@ kora-treasury = { path = "../treasury" }
 kora-risk-registry = { path = "../risk_registry" }
 kora-access-control = { path = "../access_control" }
 kora-price-oracle = { path = "../price_oracle" }
+kora-referral-rewards = { path = "../referral_rewards" }
 
 # ── Cross-contract auth fuzzing harness (Issue #610) ─────────────────────────
 [[test]]

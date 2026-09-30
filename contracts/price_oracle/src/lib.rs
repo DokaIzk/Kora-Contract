@@ -9,6 +9,11 @@ const UPGRADE_TIMELOCK_DELAY: u64 = 86_400;
 /// entry holds the whole ring, so this bounds on-chain storage growth.
 const PRICE_HISTORY_CAP: u32 = 32;
 
+/// Maximum number of price feeders that can be registered.
+/// Defense-in-depth bound for get_price aggregation loop (typically 3-7 feeders operationally).
+/// Resource cost at bound: 20 feeders × ~3,000 instructions = ~60,000 instructions (safe).
+pub const MAX_FEEDERS: u32 = 20;
+
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
 #[repr(u32)]
@@ -90,6 +95,9 @@ pub enum DataKey {
     PriceHistory(Symbol, Symbol),
     BaseCurrency,
     MaxDeviation,
+    /// Maximum allowed price change per update in basis points (e.g., 2000 = 20%).
+    /// Configured per currency pair. Prevents single-update manipulation attacks.
+    MaxRateChange(Symbol, Symbol),
     /// Peg configuration for a specific (base, quote) pair (#589).
     PegConfig(Symbol, Symbol),
     /// Set to `true` when a peg deviation has been detected and `auto_flag` is enabled.
@@ -147,6 +155,50 @@ impl PriceOracleContract {
             let expected_reciprocal = Self::compute_reciprocal(price)?;
             let tolerance_bps = 100; // 1% = 100 basis points
             Self::validate_reciprocal_tolerance(expected_reciprocal, reverse_data.price, tolerance_bps)?;
+        }
+
+        // ── Rate-Change Sanity Bound (defense against fresh-but-manipulated) ───
+        // Check if this update exceeds the configured maximum single-update change.
+        // Runs *before* peg check so both guards are independent.
+        if let Some(max_change_bps) = env
+            .storage()
+            .persistent()
+            .get::<_, u32>(&DataKey::MaxRateChange(base.clone(), quote.clone()))
+        {
+            // Get this feeder's previous price for this pair
+            if let Some(prev_data) = env
+                .storage()
+                .persistent()
+                .get::<_, PriceData>(&DataKey::FeederPrice(
+                    base.clone(),
+                    quote.clone(),
+                    feeder.clone(),
+                ))
+            {
+                // Compute percentage change: |new - old| / old * 10_000
+                let diff = (price - prev_data.price).abs();
+                let change_bps = diff
+                    .checked_mul(10_000)
+                    .and_then(|v| v.checked_div(prev_data.price))
+                    .ok_or(PriceOracleError::ArithmeticOverflow)? as u32;
+
+                if change_bps > max_change_bps {
+                    // Emit event so off-chain monitors can detect attempted manipulation
+                    env.events().publish(
+                        (soroban_sdk::symbol_short!("RATE_EX"),),
+                        (
+                            base.clone(),
+                            quote.clone(),
+                            prev_data.price,
+                            price,
+                            change_bps,
+                            max_change_bps,
+                            env.ledger().timestamp(),
+                        ),
+                    );
+                    return Err(PriceOracleError::RateChangeExceeded);
+                }
+            }
         }
 
         // ── Peg validation (#589) ─────────────────────────────────────────────

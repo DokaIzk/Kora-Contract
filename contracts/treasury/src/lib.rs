@@ -157,6 +157,8 @@ pub enum DataKey {
     NextTreasuryProposalId,
     /// A pending treasury multisig proposal, keyed by proposal id.
     TreasuryProposal(u64),
+    NextGrantId,
+    Grant(u64),
     // ── Asset Allocation Policy (Issue #673) ────────────────────────────────
     /// Governed allocation policy for a given asset (target min/max ranges).
     AssetAllocationPolicy(Address),
@@ -197,7 +199,30 @@ pub enum TreasuryAction {
     EmergencyWithdraw(Address, Address),
     SetFeeBps(u32),
     ProposeUpgrade(BytesN<32>),
+    ReviewGrant(u64),
+    ReleaseGrantMilestone(u64),
+    ReclaimGrant(u64),
 }
+
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct GrantProposal {
+    pub id: u64,
+    pub proposer: Address,
+    pub recipient: Address,
+    pub token: Address,
+    pub scope: String,
+    pub milestones: Vec<i128>,
+    pub next_milestone: u32,
+    pub remaining: i128,
+    pub reviewed: bool,
+    pub closed: bool,
+    pub submitted_at: u64,
+    pub last_activity_at: u64,
+}
+
+const GRANT_RECLAIM_DELAY: u64 = 90 * 24 * 60 * 60;
+const MAX_GRANT_MILESTONES: u32 = 20;
 
 /// A pending treasury action proposal awaiting multisig quorum.
 #[contracttype]
@@ -1766,6 +1791,11 @@ impl TreasuryContract {
             TreasuryAction::ProposeUpgrade(wasm_hash) => {
                 Self::do_propose_upgrade(&env, &executor, &wasm_hash)?;
             }
+            TreasuryAction::ReviewGrant(grant_id) => Self::review_grant(&env, grant_id)?,
+            TreasuryAction::ReleaseGrantMilestone(grant_id) => {
+                Self::release_grant_milestone(&env, grant_id)?;
+            }
+            TreasuryAction::ReclaimGrant(grant_id) => Self::reclaim_grant(&env, grant_id)?,
         }
 
         Self::append_audit_entry(
@@ -1784,6 +1814,110 @@ impl TreasuryContract {
             .persistent()
             .get(&DataKey::TreasuryProposal(proposal_id))
             .ok_or(KoraError::ProposalNotFound)
+    }
+
+    /// Submit a public grant request. Each milestone becomes a separate
+    /// quorum-and-timelock-gated treasury action after reviewers approve the grant.
+    pub fn submit_grant_proposal(
+        env: Env,
+        proposer: Address,
+        recipient: Address,
+        token: Address,
+        scope: String,
+        milestones: Vec<i128>,
+    ) -> Result<u64, TreasuryError> {
+        proposer.require_auth();
+        if scope.len() == 0 || scope.len() > 512 || milestones.len() == 0
+            || milestones.len() > MAX_GRANT_MILESTONES
+        {
+            return Err(TreasuryError::InvalidGrant);
+        }
+        Self::require_whitelisted_token(&env, &token)?;
+        let mut requested = 0i128;
+        for amount in milestones.iter() {
+            if amount <= 0 {
+                return Err(TreasuryError::InvalidGrant);
+            }
+            requested = requested.checked_add(amount).ok_or(TreasuryError::ArithmeticOverflow)?;
+        }
+        let id: u64 = env.storage().persistent().get(&DataKey::NextGrantId).unwrap_or(1);
+        let now = env.ledger().timestamp();
+        let grant = GrantProposal {
+            id,
+            proposer,
+            recipient,
+            token,
+            scope,
+            milestones,
+            next_milestone: 0,
+            remaining: requested,
+            reviewed: false,
+            closed: false,
+            submitted_at: now,
+            last_activity_at: now,
+        };
+        env.storage().persistent().set(&DataKey::Grant(id), &grant);
+        env.storage().persistent().set(
+            &DataKey::NextGrantId,
+            &id.checked_add(1).ok_or(TreasuryError::ArithmeticOverflow)?,
+        );
+        Ok(id)
+    }
+
+    pub fn get_grant_proposal(env: Env, grant_id: u64) -> Result<GrantProposal, TreasuryError> {
+        env.storage().persistent().get(&DataKey::Grant(grant_id)).ok_or(TreasuryError::GrantNotFound)
+    }
+
+    fn review_grant(env: &Env, grant_id: u64) -> Result<(), KoraError> {
+        let mut grant: GrantProposal = env.storage().persistent().get(&DataKey::Grant(grant_id))
+            .ok_or(KoraError::ProposalNotFound)?;
+        if grant.closed || grant.reviewed {
+            return Err(KoraError::Unauthorized);
+        }
+        grant.reviewed = true;
+        grant.last_activity_at = env.ledger().timestamp();
+        env.storage().persistent().set(&DataKey::Grant(grant_id), &grant);
+        Ok(())
+    }
+
+    fn release_grant_milestone(env: &Env, grant_id: u64) -> Result<(), KoraError> {
+        let mut grant: GrantProposal = env.storage().persistent().get(&DataKey::Grant(grant_id))
+            .ok_or(KoraError::ProposalNotFound)?;
+        if grant.closed {
+            return Err(KoraError::Unauthorized);
+        }
+        if !grant.reviewed {
+            return Err(KoraError::Unauthorized);
+        }
+        let amount = grant.milestones.get(grant.next_milestone).ok_or(KoraError::ProposalNotFound)?;
+        let balance = token::Client::new(env, &grant.token).balance(&env.current_contract_address());
+        let reserve: i128 = env.storage().persistent().get(&DataKey::ReserveBalance(grant.token.clone())).unwrap_or(0);
+        if balance.saturating_sub(reserve) < amount {
+            return Err(KoraError::InsufficientPoolBalance);
+        }
+        token::Client::new(env, &grant.token).transfer(&env.current_contract_address(), &grant.recipient, &amount);
+        grant.remaining -= amount;
+        grant.next_milestone += 1;
+        grant.last_activity_at = env.ledger().timestamp();
+        if grant.next_milestone >= grant.milestones.len() {
+            grant.closed = true;
+        }
+        env.storage().persistent().set(&DataKey::Grant(grant_id), &grant);
+        Ok(())
+    }
+
+    fn reclaim_grant(env: &Env, grant_id: u64) -> Result<(), KoraError> {
+        let mut grant: GrantProposal = env.storage().persistent().get(&DataKey::Grant(grant_id))
+            .ok_or(KoraError::ProposalNotFound)?;
+        if grant.closed || !grant.reviewed || grant.remaining <= 0
+            || env.ledger().timestamp() < grant.last_activity_at.saturating_add(GRANT_RECLAIM_DELAY)
+        {
+            return Err(KoraError::Unauthorized);
+        }
+        grant.closed = true;
+        grant.remaining = 0;
+        env.storage().persistent().set(&DataKey::Grant(grant_id), &grant);
+        Ok(())
     }
 
     // ── Revenue-Sharing Distribution (#667) ───────────────────────────────────

@@ -175,6 +175,25 @@ pub struct MarketplaceContract;
 
 #[contractimpl]
 impl MarketplaceContract {
+    /// Explicit admin migration. Legacy listings retain their existing codec.
+    pub fn migrate_versions(
+        env: Env, admin: Address, from_version: u32, to_version: u32,
+    ) -> Result<(), KoraError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        let key = DataKey::SchemaVersion.into_val(&env);
+        kora_shared::migration::migrate(&env, &key, from_version, to_version, SCHEMA_VERSION,
+            |old, new| match (old, new) {
+                (0, 1) => Ok(()), // No listing codec change in the baseline migration.
+                _ => Err(KoraError::InvalidParameterValue),
+            })?;
+        Ok(())
+    }
+
+    pub fn schema_version(env: Env) -> u32 {
+        kora_shared::migration::read_version(&env, &DataKey::SchemaVersion.into_val(&env))
+    }
+
     /// Initialize the marketplace. One-time call.
     pub fn initialize(
         env: Env,
@@ -212,6 +231,7 @@ impl MarketplaceContract {
             referrer_split_bps: 0,
         };
         env.storage().instance().set(&DataKey::Config, &config);
+        env.storage().instance().set(&DataKey::SchemaVersion, &SCHEMA_VERSION);
         Ok(())
     }
 
@@ -559,6 +579,7 @@ impl MarketplaceContract {
         // The named debtor must carry a risk_registry record meeting the governed
         // minimum before the invoice can be listed on the marketplace.
         Self::require_debtor_verified(&env, &invoice.debtor_hash)?;
+        Self::check_debtor_cap(&env, &invoice.debtor_hash, asking_price)?;
 
         // === #743: Circuit Breaker gate ===
         Self::require_circuit_breaker_not_tripped(&env, &invoice.debtor_hash, &invoice.risk_tier)?;
@@ -643,6 +664,7 @@ impl MarketplaceContract {
     ) -> Result<(), KoraError> {
         investor.require_auth();
         Self::require_not_paused(&env)?;
+        let _guard = ReentrancyGuard::new(&env)?;
         Self::fund_invoice_internal(&env, &investor, invoice_id, amount, payment_token.as_ref())
     }
 
@@ -666,6 +688,7 @@ impl MarketplaceContract {
     ) -> Result<soroban_sdk::Vec<BatchAllocationResult>, KoraError> {
         investor.require_auth();
         Self::require_not_paused(&env)?;
+        let _guard = ReentrancyGuard::new(&env)?;
 
         if allocations.is_empty() || allocations.len() > MAX_BATCH_SIZE {
             return Err(KoraError::InvalidAmount);
@@ -849,6 +872,10 @@ impl MarketplaceContract {
             return Err(KoraError::ExceedsFundingTarget);
         }
 
+        // Check before token movement. The entrypoint's reentrancy guard keeps
+        // the state stable until the successful allocation is recorded below.
+        Self::check_debtor_cap(env, &invoice.debtor_hash, listing_amount)?;
+
         let listing_token_client = token::Client::new(env, &listing.token);
         let token_decimals = listing_token_client.decimals();
 
@@ -883,6 +910,16 @@ impl MarketplaceContract {
             (pay_fee, pay_net)
         };
 
+        // Complete fallible local accounting before any external token movement.
+        let funded_after = safe_add(listing.funded_amount, listing_amount)?;
+        let contrib_key = DataKey::Contribution(invoice_id, investor.clone());
+        let prev_contrib: i128 = env.storage().persistent().get(&contrib_key).unwrap_or(0);
+        let contrib_after = safe_add(prev_contrib, net)?;
+        let fee_key = DataKey::FeeContribution(invoice_id, investor.clone());
+        let prev_fee: i128 = env.storage().persistent().get(&fee_key).unwrap_or(0);
+        let fee_after = safe_add(prev_fee, fee)?;
+        Self::add_debtor_exposure(env, &invoice.debtor_hash, invoice_id, listing_amount)?;
+
         let pay_token_client = token::Client::new(env, &pay_token);
         if pay_fee > 0 {
             pay_token_client.transfer(investor, &config.treasury, &pay_fee);
@@ -894,26 +931,14 @@ impl MarketplaceContract {
             pay_token_client.transfer(investor, &config.financing_pool, &pay_net);
         }
 
-        listing.funded_amount = safe_add(listing.funded_amount, listing_amount)?;
+        listing.funded_amount = funded_after;
 
         // Track per-investor net contribution for potential refund
-        let contrib_key = DataKey::Contribution(invoice_id, investor.clone());
-        let prev_contrib: i128 = env
-            .storage()
-            .persistent()
-            .get(&contrib_key)
-            .unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&contrib_key, &safe_add(prev_contrib, net)?);
+        env.storage().persistent().set(&contrib_key, &contrib_after);
 
         // Track the investor's fee share so claim_refund can claw it back
         // from the treasury on a failed/cancelled listing. (#450)
-        let fee_key = DataKey::FeeContribution(invoice_id, investor.clone());
-        let prev_fee: i128 = env.storage().persistent().get(&fee_key).unwrap_or(0);
-        env.storage()
-            .persistent()
-            .set(&fee_key, &safe_add(prev_fee, fee)?);
+        env.storage().persistent().set(&fee_key, &fee_after);
 
         let fully_funded = listing.funded_amount >= listing.asking_price;
         if fully_funded {
@@ -1233,14 +1258,19 @@ impl MarketplaceContract {
         // CEI: mark before external call
         env.storage().persistent().set(&refund_key, &true);
 
-        // Transfer net contribution back from financing pool to investor
         let config = Self::load_config(&env)?;
+        let nft_client = kora_invoice_nft::InvoiceNftContractClient::new(&env, &config.invoice_nft);
+        let invoice = nft_client.get_invoice(&invoice_id);
+        let fee_key = DataKey::FeeContribution(invoice_id, investor.clone());
+        let fee_contributed: i128 = env.storage().persistent().get(&fee_key).unwrap_or(0);
+        Self::remove_debtor_exposure(&env, &invoice.debtor_hash, invoice_id,
+            safe_add(net_contributed, fee_contributed)?)?;
+
+        // Transfer net contribution back from financing pool to investor
         let token_client = token::Client::new(&env, &listing.token);
         token_client.transfer(&config.financing_pool, &investor, &net_contributed);
 
         // Claw back the investor's proportional fee share from the treasury (#450).
-        let fee_key = DataKey::FeeContribution(invoice_id, investor.clone());
-        let fee_contributed: i128 = env.storage().persistent().get(&fee_key).unwrap_or(0);
         if fee_contributed > 0 {
             let treasury_client = kora_treasury::TreasuryContractClient::new(&env, &config.treasury);
             treasury_client.refund_fee(
@@ -2139,6 +2169,28 @@ mod tests {
         testutils::{Address as _, Ledger, LedgerInfo},
         Address, Env,
     };
+
+    #[test]
+    fn schema_migration_recall_and_wrong_target() {
+        let env = Env::default();
+        env.mock_all_auths();
+        let id = env.register_contract(None, MarketplaceContract);
+        let client = MarketplaceContractClient::new(&env, &id);
+        let admin = Address::generate(&env);
+        let nft = Address::generate(&env);
+        let pool = Address::generate(&env);
+        let treasury = Address::generate(&env);
+        let access = Address::generate(&env);
+        let oracle = Address::generate(&env);
+        let registry = Address::generate(&env);
+        client.initialize(&admin, &nft, &pool, &treasury, &access, &oracle, &registry, &50, &0);
+        assert_eq!(client.schema_version(), SCHEMA_VERSION);
+        env.as_contract(&id, || env.storage().instance().remove(&DataKey::SchemaVersion));
+        client.migrate_versions(&admin, &0, &1);
+        client.migrate_versions(&admin, &0, &1);
+        assert_eq!(client.schema_version(), 1);
+        assert!(client.try_migrate_versions(&admin, &0, &2).is_err());
+    }
 
     // ── Test harness ──────────────────────────────────────────────────────────
 

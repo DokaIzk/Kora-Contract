@@ -203,7 +203,7 @@ pub fn require_max_length_bytes(b: &Bytes, max_bytes: u32) -> Result<(), CommonE
 #[inline]
 pub fn require_exact_length(b: &Bytes, expected_len: u32) -> Result<(), CommonError> {
     if b.len() != expected_len {
-        return Err(CommonError::InvalidLength);
+        return Err(CommonError::EmptyBytes);
     }
     Ok(())
 }
@@ -223,7 +223,7 @@ pub const MAX_BATCH_MINT_SIZE: u32 = 25;
 #[inline]
 pub fn require_batch_size_within_limit(batch_size: u32) -> Result<(), CommonError> {
     if batch_size > MAX_BATCH_MINT_SIZE {
-        return Err(CommonError::BatchSizeExceeded);
+        return Err(CommonError::InvalidAmount);
     }
     Ok(())
 }

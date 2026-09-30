@@ -8,14 +8,11 @@
  */
 
 import * as http from "http";
-import * as dotenv from "dotenv";
 import { JobStore } from "./jobStore";
 import { Dispatcher } from "./dispatcher";
 import { Scheduler } from "./scheduler";
 import { KeeperConfig } from "./types";
 import pino from "pino";
-
-dotenv.config();
 
 const logger = pino({ name: "keeper" });
 
@@ -59,6 +56,19 @@ async function main(): Promise<void> {
       const counts = store.getStatusCounts();
       res.writeHead(200, { "Content-Type": "application/json" });
       res.end(JSON.stringify({ counts }));
+      return;
+    }
+
+    if (req.url === "/metrics") {
+      const counts = store.getStatusCounts();
+      const statuses = ["pending", "ready", "in_flight", "done", "dead"] as const;
+      const metrics = [
+        "# HELP kora_keeper_jobs Current keeper jobs by lifecycle status.",
+        "# TYPE kora_keeper_jobs gauge",
+        ...statuses.map((status) => `kora_keeper_jobs{status=\"${status}\"} ${counts[status] ?? 0}`),
+      ];
+      res.writeHead(200, { "Content-Type": "text/plain; version=0.0.4; charset=utf-8" });
+      res.end(`${metrics.join("\n")}\n`);
       return;
     }
 

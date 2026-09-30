@@ -1,5 +1,18 @@
 #![no_std]
 
+// Formal verification model — host-only (requires std).
+// Gated so it never gets compiled into the WASM binary.
+#[cfg(not(target_arch = "wasm32"))]
+pub mod verification {
+    pub mod model {
+        include!("../verification/model.rs");
+    }
+    pub mod invariants {
+        use super::model;
+        include!("../verification/invariants.rs");
+    }
+}
+
 use kora_shared::{
     errors::CommonError,
     events,
@@ -10,11 +23,23 @@ use kora_shared::{
     validation::{bps_of, bps_of_normalized, require_valid_bps_range, UPGRADE_TIMELOCK_DELAY},
 };
 use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Map, Symbol, Vec,
+    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, Map, Symbol, Vec,
 };
+
+pub const SCHEMA_VERSION: u32 = 1;
 
 const MAX_AMOUNT: i128 = i128::MAX / 2;
 pub const REPAYMENT_APPROVAL_THRESHOLD: i128 = 10_000_000_000i128;
+
+/// Maximum number of invoices that can be net-settled in a single transaction.
+/// Enforced to prevent DoS via unbounded iteration (6 nested loops over invoice_ids).
+/// Resource cost at bound: 10 invoices × ~20,000 instructions = ~200,000 instructions (safe).
+pub const MAX_NETTING_INVOICES: u32 = 10;
+
+/// Maximum number of distinct investors (positions) per pool.
+/// Enforced to prevent DoS in distribute_yield iteration.
+/// Resource cost at bound: 100 investors × ~5,000 instructions = ~500,000 instructions (acceptable).
+pub const MAX_POSITIONS_PER_POOL: u32 = 100;
 
 #[contracterror]
 #[derive(Copy, Clone, Debug, Eq, PartialEq, PartialOrd, Ord)]
@@ -141,6 +166,25 @@ pub struct FinancingPoolContract;
 
 #[contractimpl]
 impl FinancingPoolContract {
+    /// Explicit admin migration. Legacy deployments start at version zero.
+    pub fn migrate_versions(
+        env: Env, admin: Address, from_version: u32, to_version: u32,
+    ) -> Result<(), FinancingPoolError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        let key = DataKey::SchemaVersion.into_val(&env);
+        kora_shared::migration::migrate(&env, &key, from_version, to_version, SCHEMA_VERSION,
+            |old, new| match (old, new) {
+                (0, 1) => Ok(()), // Existing pool data retains its encoding.
+                _ => Err(FinancingPoolError::InvalidMigrationTarget),
+            })?;
+        Ok(())
+    }
+
+    pub fn schema_version(env: Env) -> u32 {
+        kora_shared::migration::read_version(&env, &DataKey::SchemaVersion.into_val(&env))
+    }
+
     /// One-time initialization. Wires up all cross-contract dependencies and configures pool parameters.
     ///
     /// **Parameters:**
@@ -203,6 +247,7 @@ impl FinancingPoolContract {
         env.storage().instance().set(&DataKey::MaxPositionBps, &max_position_bps);
         env.storage().instance().set(&DataKey::GracePeriod, &grace_period);
         env.storage().instance().set(&DataKey::DisputeResolution, &dispute_resolution);
+        env.storage().instance().set(&DataKey::SchemaVersion, &SCHEMA_VERSION);
         Ok(())
     }
 
@@ -502,6 +547,12 @@ impl FinancingPoolContract {
             .get(investor.clone())
             .map(|p: Position| p.contributed)
             .unwrap_or(0);
+
+        // Enforce maximum distinct investors per pool to prevent DoS in distribute_yield.
+        // Only check when adding a NEW investor (not updating existing position).
+        if old_contributed == 0 && positions.len() >= MAX_POSITIONS_PER_POOL {
+            return Err(FinancingPoolError::TooManyInvestors);
+        }
 
         positions.set(investor.clone(), position);
         env.storage()
@@ -840,6 +891,10 @@ impl FinancingPoolContract {
     ) -> Result<(), FinancingPoolError> {
         payer.require_auth();
 
+        if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
+            return Err(FinancingPoolError::EscrowPending);
+        }
+
         if amount <= 0 || amount > MAX_AMOUNT {
             return Err(FinancingPoolError::InvalidAmount);
         }
@@ -940,6 +995,9 @@ impl FinancingPoolContract {
         token: Address,
         amount: i128,
     ) -> Result<(), FinancingPoolError> {
+        if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
+            return Err(FinancingPoolError::EscrowPending);
+        }
         // ── #584: hoist NFT contract address read once for the entire repay call.
         // Used for freeze check, invoice fetch, and set_repaid — avoids 3 separate
         // instance storage reads.
@@ -1203,6 +1261,10 @@ impl FinancingPoolContract {
         if invoice_ids.len() < 2 {
             return Err(FinancingPoolError::InvalidAmount);
         }
+        // Enforce maximum netting batch size to prevent DoS via unbounded iteration (6 nested loops).
+        if invoice_ids.len() > MAX_NETTING_INVOICES {
+            return Err(FinancingPoolError::BatchSizeExceeded);
+        }
 
         let nft_contract: Address = env
             .storage()
@@ -1219,6 +1281,10 @@ impl FinancingPoolContract {
 
         for i in 0..n {
             let invoice_id = invoice_ids.get(i).unwrap();
+
+            if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
+                return Err(FinancingPoolError::EscrowPending);
+            }
 
             // Frozen check
             if nft_client.is_invoice_frozen(&invoice_id) {
@@ -1530,6 +1596,10 @@ impl FinancingPoolContract {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         Self::require_not_paused(&env)?;
+
+        if env.storage().persistent().has(&DataKey::EscrowPending(invoice_id)) {
+            return Err(FinancingPoolError::EscrowPending);
+        }
 
         if env.storage().persistent().has(&DataKey::RepaymentLock(invoice_id)) {
             return Err(FinancingPoolError::Unauthorized);
@@ -2679,6 +2749,19 @@ mod tests {
     fn test_initialize_success() {
         let (_env, _admin, _nft, _treasury, _ac, client) = setup();
         assert!(client.try_get_pool(&1u64).is_err()); // No pools yet
+    }
+
+    #[test]
+    fn schema_migration_is_explicit_and_idempotent() {
+        let (env, admin, _nft, _treasury, _ac, client) = setup();
+        assert_eq!(client.schema_version(), SCHEMA_VERSION);
+        env.as_contract(&client.address, || env.storage().instance().remove(&DataKey::SchemaVersion));
+        assert_eq!(client.schema_version(), 0);
+        client.migrate_versions(&admin, &0, &1);
+        client.migrate_versions(&admin, &0, &1);
+        assert_eq!(client.schema_version(), 1);
+        assert_eq!(client.try_migrate_versions(&admin, &0, &2).unwrap_err().unwrap(),
+            FinancingPoolError::InvalidMigrationTarget);
     }
 
     #[test]

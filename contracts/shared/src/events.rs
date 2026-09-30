@@ -1033,6 +1033,16 @@ pub fn bid_accepted(
 
 // ── Admin Audit Trail ─────────────────────────────────────────────────────────
 
+/// Emitted when a pending upgrade is cancelled before execution.
+/// Schema: (admin, timestamp)
+pub fn upgrade_cancelled(env: &Env, admin: &Address) {
+    emit(
+        env,
+        symbol_short!("UPG_CNCL"),
+        (admin.clone(), env.ledger().timestamp()),
+    );
+}
+
 /// Canonical admin-action audit event emitted alongside every admin-gated call.
 /// Subscribe to `ADM_AUDIT` across all protocol contracts to build a consolidated
 /// off-chain compliance report via Horizon, Mercury, or a custom indexer.
