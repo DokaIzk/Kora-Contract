@@ -98,8 +98,8 @@ describe('wallet network normalization', () => {
     ['test network', undefined, 'testnet'],
     ['PUBLIC', undefined, 'mainnet'],
     ['pubnet', undefined, 'mainnet'],
-    ['custom public network', undefined, 'mainnet'],
-    ['something-testnet-v2', undefined, 'testnet'],
+    ['custom public network', undefined, 'unknown'],
+    ['something-testnet-v2', undefined, 'unknown'],
     ['mystery', undefined, 'unknown'],
     [undefined, STELLAR_NETWORK_PASSPHRASES.testnet, 'testnet'],
     [undefined, STELLAR_NETWORK_PASSPHRASES.mainnet, 'mainnet'],
@@ -1400,7 +1400,7 @@ describe('coverage-critical wallet invariants', () => {
 
     expect(listener).toHaveBeenCalledWith({
       address: mainnetConnection.address,
-      network: 'testnet',
+      network: 'unknown',
     });
 
     handlers.get('networkChanged')?.();

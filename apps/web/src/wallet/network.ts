@@ -12,16 +12,19 @@ export function normalizeWalletNetwork(
   network?: string | null,
   networkPassphrase?: string | null,
 ): WalletNetwork {
-  const passphrase = networkPassphrase?.trim();
-  if (passphrase === STELLAR_NETWORK_PASSPHRASES.mainnet) return 'mainnet';
-  if (passphrase === STELLAR_NETWORK_PASSPHRASES.testnet) return 'testnet';
+  // A passphrase is the network identity used for transaction hashing. Do not
+  // trim it or fall back to a friendly name when a different one is supplied.
+  if (networkPassphrase !== undefined && networkPassphrase !== null) {
+    if (networkPassphrase === STELLAR_NETWORK_PASSPHRASES.mainnet) return 'mainnet';
+    if (networkPassphrase === STELLAR_NETWORK_PASSPHRASES.testnet) return 'testnet';
+    return 'unknown';
+  }
 
-  const normalized = network?.trim().toLowerCase();
-  if (!normalized) return 'unknown';
+  // Rabet supplies a name, not a passphrase. Accept only documented aliases;
+  // names such as "private-testnet" are not evidence of a public network.
+  const normalized = typeof network === 'string' ? network.trim().toLowerCase() : '';
   if (MAINNET_NAMES.has(normalized)) return 'mainnet';
   if (TESTNET_NAMES.has(normalized)) return 'testnet';
-  if (normalized.includes('mainnet') || normalized.includes('public')) return 'mainnet';
-  if (normalized.includes('testnet')) return 'testnet';
   return 'unknown';
 }
 

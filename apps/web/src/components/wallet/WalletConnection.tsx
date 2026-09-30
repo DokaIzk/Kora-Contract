@@ -80,7 +80,7 @@ export const WalletConnection: React.FC = () => {
         </div>
       )}
 
-      {status === 'error' && (
+      {(status === 'error' || (status === 'disconnected' && error)) && (
         <div role="alert">
           {error ?? 'Wallet connection failed.'}
         </div>

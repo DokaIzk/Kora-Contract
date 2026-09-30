@@ -1,4 +1,4 @@
-import { isNetworkMismatch } from './network';
+import { isNetworkMismatch, normalizeWalletNetwork } from './network';
 import { FreighterWalletAdapter, RabetWalletAdapter } from './adapters';
 import type {
   StorageLike,
@@ -154,8 +154,10 @@ export class WalletManager {
       return this.getState();
     }
 
+    // Cancellation must be checked before starting another provider request,
+    // not merely when its result returns (connect can open an approval prompt).
+    if (token !== this.operation) return this.getState();
     if (!installed) {
-      if (token !== this.operation) return this.getState();
 
       this.setState({
         status: 'install-required',
@@ -173,12 +175,16 @@ export class WalletManager {
       if (token !== this.operation) return this.getState();
 
       this.applyConnection(walletId, connection);
+      if (token !== this.operation) return this.getState();
       if (
         this.state.status === 'connected' ||
         this.state.status === 'network-mismatch'
       ) {
-        persistLastWallet(this.storage, walletId);
-        this.startAdapterSubscription(adapter);
+        if (this.startAdapterSubscription(adapter, token) &&
+            token === this.operation &&
+            (this.state.status === 'connected' || this.state.status === 'network-mismatch')) {
+          persistLastWallet(this.storage, walletId);
+        }
       }
     } catch (error) {
       if (token !== this.operation) return this.getState();
@@ -226,8 +232,10 @@ export class WalletManager {
       return this.getState();
     }
 
+    // Cancellation must be checked before starting another provider request,
+    // not merely when its result returns (connect can open an approval prompt).
+    if (token !== this.operation) return this.getState();
     if (!installed) {
-      if (token !== this.operation) return this.getState();
 
       this.setState({
         status: 'install-required',
@@ -272,33 +280,41 @@ export class WalletManager {
     }
 
     this.applyConnection(walletId, restored);
+    if (token !== this.operation) return this.getState();
     if (
       this.state.status === 'connected' ||
       this.state.status === 'network-mismatch'
     ) {
-      this.startAdapterSubscription(adapter);
+      this.startAdapterSubscription(adapter, token);
     }
     return this.getState();
   }
 
   async disconnect(): Promise<void> {
-    ++this.operation;
+    const token = ++this.operation;
     const adapter =
       this.state.walletId === null
         ? undefined
         : this.adapters.get(this.state.walletId);
 
     this.stopAdapterSubscription();
+    // Clear the usable local session immediately. A slow extension must not
+    // leave a connected account visible or later erase a newer connection.
+    persistLastWallet(this.storage, null);
+    this.state = {
+      ...DEFAULT_STATE,
+      expectedNetwork: this.state.expectedNetwork,
+    };
+    this.emit();
 
     try {
       await adapter?.disconnect();
-    } finally {
-      persistLastWallet(this.storage, null);
-      this.state = {
-        ...DEFAULT_STATE,
-        expectedNetwork: this.state.expectedNetwork,
-      };
-      this.emit();
+    } catch {
+      if (token === this.operation) {
+        this.setState({
+          error: 'Local session cleared. The wallet extension did not confirm disconnect.',
+        });
+      }
     }
   }
 
@@ -308,53 +324,85 @@ export class WalletManager {
     this.listeners.clear();
   }
 
-  private startAdapterSubscription(adapter: WalletAdapter): void {
+  private startAdapterSubscription(adapter: WalletAdapter, token: number): boolean {
     this.stopAdapterSubscription();
+    let active = true;
 
-    this.unsubscribeAdapter = adapter.subscribe((connection) => {
-      if (this.state.walletId !== adapter.id) return;
+    try {
+      const unsubscribe = adapter.subscribe((connection) => {
+        // A previous connection to the SAME wallet may still deliver a queued
+        // callback after unsubscribe. Wallet identity alone is not sufficient.
+        if (!active || token !== this.operation || this.state.walletId !== adapter.id) return;
 
-      if (!connection) {
+        if (!connection) {
+          this.setState({
+            status: 'disconnected',
+            walletId: adapter.id,
+            address: null,
+            walletNetwork: 'unknown',
+            error: undefined,
+          });
+          return;
+        }
+        this.applyConnection(adapter.id, connection);
+      });
+
+      const stop = () => {
+        if (!active) return;
+        active = false;
+        try { unsubscribe(); } catch {
+          // Locally invalidate callbacks even if the extension's off() fails.
+        }
+      };
+      // A synchronous subscription callback can trigger a newer user action.
+      if (token !== this.operation) {
+        stop();
+        return false;
+      }
+      this.unsubscribeAdapter = stop;
+      return true;
+    } catch (error) {
+      active = false;
+      if (token === this.operation) {
         this.setState({
-          status: 'disconnected',
-          walletId: adapter.id,
+          status: 'error',
           address: null,
           walletNetwork: 'unknown',
-          error: undefined,
+          error: error instanceof Error ? error.message : 'Wallet change monitoring failed.',
         });
-        return;
       }
-
-      this.applyConnection(adapter.id, connection);
-    });
+      return false;
+    }
   }
 
   private stopAdapterSubscription(): void {
-    this.unsubscribeAdapter?.();
+    const unsubscribe = this.unsubscribeAdapter;
     this.unsubscribeAdapter = undefined;
+    unsubscribe?.();
   }
 
   private applyConnection(
     walletId: WalletId,
     connection: WalletSession,
   ): void {
-    if (!connection.address) {
+    const walletNetwork = normalizeWalletNetwork(connection?.network, connection?.networkPassphrase);
+    if (!connection || typeof connection.address !== 'string' || !connection.address.trim()) {
       this.setState({
         status: 'error',
         walletId,
         address: null,
-        walletNetwork: connection.network,
+        walletNetwork,
         error: 'Wallet returned an empty account address.',
       });
       return;
     }
 
-    if (connection.network === 'unknown') {
+    if (walletNetwork === 'unknown') {
       this.setState({
         status: 'error',
         walletId,
         address: connection.address,
-        walletNetwork: connection.network,
+        walletNetwork,
         error: 'Wallet network could not be determined.',
       });
       return;
@@ -362,14 +410,14 @@ export class WalletManager {
 
     this.setState({
       status: isNetworkMismatch(
-        connection.network,
+        walletNetwork,
         this.state.expectedNetwork,
       )
         ? 'network-mismatch'
         : 'connected',
       walletId,
       address: connection.address,
-      walletNetwork: connection.network,
+      walletNetwork,
       error: undefined,
       installUrl: undefined,
     });
@@ -381,8 +429,7 @@ export class WalletManager {
   }
 
   private emit(): void {
-    const snapshot = this.getState();
-    for (const listener of this.listeners) listener(snapshot);
+    for (const listener of this.listeners) listener(this.getState());
   }
 }
 

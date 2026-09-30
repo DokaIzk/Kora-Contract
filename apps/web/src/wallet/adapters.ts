@@ -88,8 +88,8 @@ const OFFICIAL_FREIGHTER_API: FreighterApi = {
   ) => FreighterWatcher,
 };
 
-function defaultFreighterProvider(): FreighterApi {
-  return OFFICIAL_FREIGHTER_API;
+function defaultFreighterProvider(): FreighterApi | undefined {
+  return typeof window === 'undefined' ? undefined : OFFICIAL_FREIGHTER_API;
 }
 
 function defaultRabetProvider(): RabetApi | undefined {
@@ -171,31 +171,51 @@ export class FreighterWalletAdapter implements WalletAdapter {
 
     if (api.WatchWalletChanges) {
       const watcher = new api.WatchWalletChanges(this.watchIntervalMs);
-      watcher.watch(({ address, network, networkPassphrase, error }) => {
-        if (error || !address) {
-          listener(null);
-          return;
-        }
-        listener({
-          address,
-          network: normalizeWalletNetwork(network, networkPassphrase),
-          networkPassphrase,
+      let active = true;
+      try {
+        const result = watcher.watch(({ address, network, networkPassphrase, error }) => {
+          if (!active) return;
+          if (error || !address) {
+            listener(null);
+            return;
+          }
+          listener({
+            address,
+            network: normalizeWalletNetwork(network, networkPassphrase),
+            networkPassphrase,
+          });
         });
-      });
-      return () => watcher.stop();
+        assertApiResult(result.error, 'Freighter change monitoring failed.');
+      } catch (error) {
+        active = false;
+        try { watcher.stop(); } catch { /* preserve the initialization error */ }
+        throw error;
+      }
+      return () => {
+        if (!active) return;
+        active = false;
+        watcher.stop();
+      };
     }
 
     let active = true;
-    let lastSignature = '';
+    let inFlight = false;
+    let lastSignature: string | undefined;
     const poll = async () => {
-      if (!active) return;
-      const connection = await this.restore();
-      const signature = connection
-        ? [connection.address, connection.network, connection.networkPassphrase ?? ''].join(':')
-        : '';
-      if (signature !== lastSignature) {
-        lastSignature = signature;
-        listener(connection);
+      if (!active || inFlight) return;
+      inFlight = true;
+      try {
+        const connection = await this.restore();
+        if (!active) return;
+        const signature = connection
+          ? [connection.address, connection.network, connection.networkPassphrase ?? ''].join(':')
+          : '';
+        if (signature !== lastSignature) {
+          lastSignature = signature;
+          listener(connection);
+        }
+      } finally {
+        inFlight = false;
       }
     };
 
@@ -268,12 +288,9 @@ export class RabetWalletAdapter implements WalletAdapter {
 
   async disconnect(): Promise<void> {
     const api = this.providerFactory();
-    try {
-      await api?.disconnect();
-    } finally {
-      this.address = null;
-      this.network = 'unknown';
-    }
+    this.address = null;
+    this.network = 'unknown';
+    await api?.disconnect();
   }
 
   subscribe(listener: WalletChangeListener): () => void {
@@ -281,56 +298,74 @@ export class RabetWalletAdapter implements WalletAdapter {
     if (!api) return () => undefined;
 
     let active = true;
+    let refreshId = 0;
+    let networkRevision = 0;
 
     const accountChanged = () => {
       if (!active) return;
+      const requestId = ++refreshId;
       void (async () => {
         try {
           const result = await api.connect();
-          const publicKey =
-            typeof result === 'string'
-              ? result
-              : result.publicKey ?? result.address ?? '';
-
+          if (!active || requestId !== refreshId) return;
+          if (typeof result !== 'string' && result.error) throw new Error(result.error);
+          const publicKey = typeof result === 'string'
+            ? result
+            : result.publicKey ?? result.address ?? '';
           if (!publicKey) {
+            this.address = null;
             listener(null);
             return;
           }
 
-          this.address = publicKey;
+          const revision = networkRevision;
           const networkResult = await api.getNetwork();
-          const networkName =
-            typeof networkResult === 'string'
-              ? networkResult
-              : networkResult.network ?? this.network;
+          if (!active || requestId !== refreshId) return;
+          if (typeof networkResult !== 'string' && networkResult.error) {
+            throw new Error(networkResult.error);
+          }
+          // A networkChanged event after this request started is newer evidence.
+          const networkName = revision === networkRevision
+            ? (typeof networkResult === 'string' ? networkResult : networkResult.network ?? '')
+            : this.network;
 
+          this.address = publicKey;
           this.network = networkName;
-          listener({
-            address: publicKey,
-            network: normalizeWalletNetwork(networkName),
-          });
+          listener({ address: publicKey, network: normalizeWalletNetwork(networkName) });
         } catch {
+          if (!active || requestId !== refreshId) return;
+          this.address = null;
+          this.network = 'unknown';
           listener(null);
         }
       })();
     };
 
     const networkChanged = (network?: string) => {
-      if (!active || !this.address) return;
+      if (!active) return;
+      ++networkRevision;
       this.network = network ?? 'unknown';
+      if (!this.address) return;
       listener({
         address: this.address,
         network: normalizeWalletNetwork(this.network),
       });
     };
 
-    api.on('accountChanged', accountChanged);
-    api.on('networkChanged', networkChanged);
-
-    return () => {
+    const stop = () => {
+      if (!active) return;
       active = false;
-      api.off?.('accountChanged', accountChanged);
-      api.off?.('networkChanged', networkChanged);
+      ++refreshId;
+      try { api.off?.('accountChanged', accountChanged); } catch { /* local guard remains closed */ }
+      try { api.off?.('networkChanged', networkChanged); } catch { /* release the other handler independently */ }
     };
+    try {
+      api.on('accountChanged', accountChanged);
+      api.on('networkChanged', networkChanged);
+    } catch (error) {
+      stop();
+      throw error;
+    }
+    return stop;
   }
 }

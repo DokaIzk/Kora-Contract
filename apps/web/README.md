@@ -43,6 +43,40 @@ Responsive mobile-first user interface and front-end integration layer for Kora 
 
 If an extension is missing, `WalletConnection` renders the wallet's install link. If the wallet is on a different known network, it renders an alert instructing the user to switch networks before signing. Freighter uses the official `@stellar/freighter-api` package; Rabet uses its documented injected `window.rabet` provider.
 
+#### Connection lifecycle and validation
+
+See [wallet validation evidence](./docs/wallet-validation.md) for commands, results, and baseline limitations.
+
+The canonical network passphrase takes precedence over the wallet's display
+name. Unknown, custom, or whitespace-modified passphrases are not treated as
+Stellar mainnet/testnet. For providers returning names only, only exact documented
+aliases are recognized; a substring such as `private-testnet` is insufficient.
+
+Each manager operation owns a generation. Late installation checks cannot open
+an obsolete connect prompt, and queued callbacks from a previous connection
+(including the same wallet) cannot replace the current account. Local disconnect
+is immediate even when the extension is slow or rejects cleanup. A later session
+and its stored wallet choice are not cleared by an older disconnect response.
+
+Provider subscriptions invalidate their callbacks before removing listeners.
+Freighter fallback polling is serialized. Rabet account refreshes keep the latest
+account and network evidence rather than applying out-of-order responses.
+
+Run the focused tests from `apps/web`:
+
+```sh
+npm test -- --runInBand --runTestsByPath tests/wallet.test.ts tests/wallet-lifecycle.test.ts tests/wallet-ui.test.tsx --coverage --collectCoverageFrom='src/wallet/**/*.ts'
+```
+
+The lifecycle suite includes an independent state-machine oracle that drives the
+**actual WalletManager** through all 4,096 four-action sequences of connect,
+disconnect, network changes, expected-network changes, and session loss. Directed
+deferred-Promise tests separately cover cancellation and out-of-order responses.
+The UI integration tests render the real provider/component for connection,
+installation, mismatch, unknown-network, and cleanup-failure states. Providers
+are mocked: these tests do not contact a network, open an extension, sign a
+transaction, or move funds. They are not a live-wallet integration certification.
+
 ![Wallet connection states](./docs/wallet-connection-states.png)
 
 ### 6. Wave Contributor Dashboard
