@@ -9,6 +9,8 @@ interface ListingItem {
   faceValueUsd: number;
   riskScore: number;
   progressPercent: number;
+  tenorDays: number;
+  expectedYieldPercent: number;
 }
 
 const SAMPLE_LISTINGS: ListingItem[] = [
@@ -19,6 +21,8 @@ const SAMPLE_LISTINGS: ListingItem[] = [
     faceValueUsd: 10000,
     riskScore: 85,
     progressPercent: 75,
+    tenorDays: 45,
+    expectedYieldPercent: 5.26,
   },
   {
     id: 102,
@@ -27,6 +31,8 @@ const SAMPLE_LISTINGS: ListingItem[] = [
     faceValueUsd: 5000,
     riskScore: 92,
     progressPercent: 40,
+    tenorDays: 30,
+    expectedYieldPercent: 5.26,
   },
   {
     id: 103,
@@ -35,12 +41,18 @@ const SAMPLE_LISTINGS: ListingItem[] = [
     faceValueUsd: 15000,
     riskScore: 78,
     progressPercent: 10,
+    tenorDays: 90,
+    expectedYieldPercent: 5.63,
   },
 ];
 
 interface MarketplaceBrowsingFlowProps {
   onSelectListingForFunding?: (id: number, amount: number) => void;
 }
+
+type RiskTier = 'all' | 'low' | 'medium' | 'high';
+type FundingStatus = 'all' | 'open' | 'funded';
+type SortKey = 'yield' | 'tenor' | 'risk' | 'progress';
 
 export const MarketplaceBrowsingFlow: React.FC<MarketplaceBrowsingFlowProps> = ({
   onSelectListingForFunding,
