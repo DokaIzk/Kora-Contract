@@ -29,7 +29,7 @@
 //! 4. Old key revoked, new key assumes all verifier state
 //! 5. Rotation logged with both old and new keys
 
-use soroban_sdk::{contracttype, Address, Env};
+use soroban_sdk::{contracttype, Address};
 use crate::errors::CommonError;
 
 /// Proposed key rotation pending timelock

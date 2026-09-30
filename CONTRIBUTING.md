@@ -7,6 +7,7 @@ Thank you for your interest in contributing to Kora. This is an open-source prot
 ## Table of Contents
 
 - [Code of Conduct](#code-of-conduct)
+- [New Here? Start With Onboarding](#new-here-start-with-onboarding)
 - [How to Contribute](#how-to-contribute)
 - [Development Setup](#development-setup)
 - [Branching Strategy](#branching-strategy)
@@ -21,6 +22,19 @@ Thank you for your interest in contributing to Kora. This is an open-source prot
 ## Code of Conduct
 
 This project follows the [Contributor Covenant](https://www.contributor-covenant.org/version/2/1/code_of_conduct/). By participating, you agree to uphold a respectful, inclusive environment. Harassment, discrimination, or bad-faith contributions will not be tolerated.
+
+---
+
+## New Here? Start With Onboarding
+
+If this is your first PR to Kora, [`docs/ONBOARDING.md`](docs/ONBOARDING.md)
+is the fastest path from clone to merged PR — local setup, how the codebase
+is organized, and what "done" looks like for a first contribution. For what
+to actually work on, see [`docs/GOOD_FIRST_ISSUES.md`](docs/GOOD_FIRST_ISSUES.md)
+or browse issues labeled
+[`good first issue`](https://github.com/OpenLedger-Foundation/Kora-Contract/issues?q=is%3Aissue+is%3Aopen+label%3A%22good+first+issue%22).
+The rest of this document is the full contributor reference; the onboarding
+guide is the short version for getting started.
 
 ---
 
@@ -343,6 +357,16 @@ See [docs/RELEASE.md](docs/RELEASE.md) for the complete release workflow, includ
 ## Recognition
 
 All contributors are listed in [CONTRIBUTORS.md](CONTRIBUTORS.md). Significant contributions may be recognized with a protocol grant from the Kora Foundation.
+
+---
+
+## Maintainers: Curating Good First Issues
+
+The `good first issue` label is actively curated, not a one-time tag — see
+[`docs/GOOD_FIRST_ISSUES.md`](docs/GOOD_FIRST_ISSUES.md) for the sizing rubric,
+where candidates come from, and the weekly
+[`good-first-issue-curation.yml`](.github/workflows/good-first-issue-curation.yml)
+workflow that flags stale or dropped claims and an empty pipeline.
 
 ---
 

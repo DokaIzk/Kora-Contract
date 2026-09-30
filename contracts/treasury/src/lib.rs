@@ -40,8 +40,8 @@ pub enum TreasuryError {
     DistributionProposalNotFound = 19,
     SweepSplitsNotConfigured = 20,
     InvalidSweepSplits = 21,
-    InvalidGrant = 27,
-    GrantNotFound = 28,
+    InvalidGrant = 22,
+    GrantNotFound = 23,
 }
 
 impl From<CommonError> for TreasuryError {

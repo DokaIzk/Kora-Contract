@@ -1,6 +1,7 @@
 [workspace]
 members = [
     "contracts/shared",
+    "contracts/debtor_attestation",
     "contracts/invoice_nft",
     "contracts/marketplace",
     "contracts/financing_pool",

@@ -80,7 +80,6 @@ pub enum KoraError {
     EmptyBytes = 97,
     Reentrancy = 98,
     InvalidLength = 99,
-    InvalidParameterValue = 135,
     FieldTooLong = 102,
 
     // Upgrade
@@ -150,6 +149,9 @@ pub enum KoraError {
 
     // circuit breaker (#743)
     CircuitBreakerTripped = 164,
+
+    // Parameter/migration validation
+    InvalidParameterValue = 165,
 }
 
 /// Common validation/arithmetic errors shared by every contract's

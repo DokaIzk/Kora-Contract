@@ -97,6 +97,10 @@ Kora-Contract/
 
 ## Getting Started
 
+> New contributor? [`docs/ONBOARDING.md`](docs/ONBOARDING.md) walks through
+> setup, codebase structure, and your first PR. Looking for something to
+> work on? See [`docs/GOOD_FIRST_ISSUES.md`](docs/GOOD_FIRST_ISSUES.md).
+
 ### Prerequisites
 
 - [Rust](https://www.rust-lang.org/tools/install) 1.75+

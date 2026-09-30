@@ -1,0 +1,17 @@
+[package]
+name = "debtor_attestation"
+version = "0.1.0"
+edition = "2021"
+description = "Debtor-side confirmation contract for invoice authenticity"
+license = "Apache-2.0"
+
+[lib]
+crate-type = ["cdylib", "rlib"]
+path = "src/lib.rs"
+
+[dependencies]
+soroban-sdk = { workspace = true }
+kora-shared = { path = "../shared" }
+
+[dev-dependencies]
+soroban-sdk = { workspace = true, features = ["testutils"] }

@@ -39,7 +39,7 @@ impl From<CommonError> for RecurringFacilityError {
 }
 
 #[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Copy, Clone, Debug, Eq, PartialEq)]
 pub enum DrawStatus {
     Active = 1,
     Repaid = 2,

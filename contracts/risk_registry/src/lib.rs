@@ -47,11 +47,11 @@ pub enum RiskRegistryError {
     // ── Circuit Breaker Errors ────────────────────────────────────────────────
     CircuitBreakerTripped = 25,
     BreakerNotConfigured = 26,
-    // ── Verifier Lifecycle Errors ─────────────────────────────────────────────
-    VerifierSuspended = 27,
-    InvalidStatusTransition = 28,
-    NoRemovalRequested = 29,
-    RemovalCooldownNotElapsed = 30,
+    // ── Verifier Removal & Suspension Errors (Issue #739) ─────────────────────
+    InvalidStatusTransition = 27,
+    NoRemovalRequested = 28,
+    RemovalCooldownNotElapsed = 29,
+    VerifierSuspended = 30,
     ReadditionCooldownNotElapsed = 31,
 }
 
@@ -104,7 +104,7 @@ pub const VERIFIER_READD_COOLDOWN_SECS: u64 = 7 * 24 * 3_600; // 7 days
 pub const MIN_SCORE_UPDATE_INTERVAL: u64 = 3_600; // 1 hour
 
 /// Maximum number of verifiers allowed to submit attestations for a single debtor.
-pub const MAX_VERIFIERS_PER_DEBTOR: u32 = 10;
+pub const MAX_VERIFIERS_PER_DEBTOR: u32 = 50;
 
 // ── Types ────────────────────────────────────────────────────────────────────
 
