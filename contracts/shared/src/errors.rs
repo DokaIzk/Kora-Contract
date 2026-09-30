@@ -149,6 +149,9 @@ pub enum KoraError {
 
     // circuit breaker (#743)
     CircuitBreakerTripped = 164,
+
+    // Parameter/migration validation
+    InvalidParameterValue = 165,
 }
 
 /// Common validation/arithmetic errors shared by every contract's

@@ -29,11 +29,12 @@
 //! 4. Old key revoked, new key assumes all verifier state
 //! 5. Rotation logged with both old and new keys
 
-use soroban_sdk::{Address, Env};
+use soroban_sdk::Address;
 use crate::errors::CommonError;
 
 /// Proposed key rotation pending timelock
-#[derive(Clone, Debug, soroban_sdk::contracttype)]
+#[derive(Clone, Debug)]
+#[soroban_sdk::contracttype]
 pub struct KeyRotationProposal {
     /// Old key being rotated out
     pub old_key: Address,
@@ -48,7 +49,8 @@ pub struct KeyRotationProposal {
 }
 
 /// Type of key being rotated
-#[derive(Clone, Debug, Eq, PartialEq, soroban_sdk::contracttype)]
+#[derive(Clone, Debug, Eq, PartialEq)]
+#[soroban_sdk::contracttype]
 pub enum KeyRotationType {
     /// Multi-sig co-signer rotation
     MultisigSigner,
