@@ -41,7 +41,7 @@ impl TreasuryReport {
         // Find and update existing entry, or append new one
         let mut found = false;
         for i in 0..self.balances.len() {
-            if let Ok(entry) = self.balances.get(i) {
+            if let Some(entry) = self.balances.get(i) {
                 if entry.token == token {
                     self.balances.set(i, TokenBalance {
                         token: token.clone(),

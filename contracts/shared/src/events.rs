@@ -193,6 +193,15 @@ pub fn repayment_made(env: &Env, invoice_id: u64, payer: &Address, amount: i128)
     );
 }
 
+/// Schema: (actor=payer, invoice_id, amount, timestamp)
+pub fn repayment_approved(env: &Env, invoice_id: u64, payer: &Address, amount: i128) {
+    emit(
+        env,
+        symbol_short!("REP_APPR"),
+        (payer.clone(), invoice_id, amount, env.ledger().timestamp()),
+    );
+}
+
 /// Schema: (actor=payer, invoice_id, installment_index, amount, timestamp)
 pub fn installment_paid(env: &Env, invoice_id: u64, payer: &Address, index: u32, amount: i128) {
     emit(
@@ -934,6 +943,25 @@ pub fn metadata_hash_corrected(
     );
 }
 
+/// Schema: (actor=sme, invoice_id, new_cid, timestamp)
+pub fn metadata_cid_updated(
+    env: &Env,
+    invoice_id: u64,
+    sme: &Address,
+    new_cid: &String,
+) {
+    emit(
+        env,
+        symbol_short!("MTD_CID"),
+        (
+            sme.clone(),
+            invoice_id,
+            new_cid.clone(),
+            env.ledger().timestamp(),
+        ),
+    );
+}
+
 // ── Dutch Auction / Decay Schedule Events (#439) ──────────────────────────────
 
 /// Schema: (actor=seller, invoice_id, floor_price, decay_end_ts, timestamp)
@@ -1128,7 +1156,7 @@ pub fn share_listed_for_sale(
 ) {
     emit(
         env,
-        symbol_short!("SHR_SALE"),
+        Symbol::new(env, "SHARE_SALE"),
         (
             invoice_id,
             share_index,
@@ -1148,7 +1176,7 @@ pub fn share_sold(
 ) {
     emit(
         env,
-        symbol_short!("SHR_SOLD"),
+        Symbol::new(env, "SHARE_SOLD"),
         (
             invoice_id,
             share_index,
@@ -1240,183 +1268,139 @@ pub fn dispute_payout(
     );
 }
 
-// ── Parameter Registry Events ─────────────────────────────────────────────────
+// ── Treasury Fee Sweep Automation (#742) ────────────────────────────────────
 
-/// Emitted when the parameter registry is initialized.
-/// Schema: (actor=admin, timestamp)
-pub fn registry_param_initialized(env: &Env, admin: &Address) {
-    emit(
-        env,
-        symbol_short!("PR_INIT"),
-        (admin.clone(), env.ledger().timestamp()),
-    );
-}
-
-/// Emitted when a governance proposal to update a registry parameter is submitted.
-/// Schema: (actor=proposer, param_key_hash: u32, new_value, timestamp)
-pub fn param_update_proposed(env: &Env, proposer: &Address, param_key_hash: u32, new_value: i128) {
-    emit(
-        env,
-        symbol_short!("PR_PROP"),
-        (proposer.clone(), param_key_hash, new_value, env.ledger().timestamp()),
-    );
-}
-
-/// Emitted when a registry parameter update is approved by a signer.
-/// Schema: (actor=approver, proposal_id, approval_count, timestamp)
-pub fn param_update_approved(env: &Env, approver: &Address, proposal_id: u64, approval_count: u32) {
-    emit(
-        env,
-        symbol_short!("PR_APPR"),
-        (approver.clone(), proposal_id, approval_count, env.ledger().timestamp()),
-    );
-}
-
-/// Emitted when a registry parameter is actually updated (proposal executed).
-/// Schema: (actor=executor, param_key_hash: u32, old_value, new_value, timestamp)
-pub fn param_updated(env: &Env, executor: &Address, param_key_hash: u32, old_value: i128, new_value: i128) {
-    emit(
-        env,
-        symbol_short!("PR_UPD"),
-        (executor.clone(), param_key_hash, old_value, new_value, env.ledger().timestamp()),
-    );
-}
-
-/// Emitted when a consuming contract refreshes a cached parameter from the registry.
-/// Schema: (contract=consumer, param_key_hash: u32, new_cached_value, timestamp)
-pub fn param_cache_refreshed(env: &Env, consumer: &Address, param_key_hash: u32, new_value: i128) {
-    emit(
-        env,
-        symbol_short!("PR_CACHE"),
-        (consumer.clone(), param_key_hash, new_value, env.ledger().timestamp()),
-    );
-}
-
-// ── Contributor Badge Events ──────────────────────────────────────────────────
-
-/// Emitted when a contributor badge is minted.
-/// Schema: (actor=issuer, badge_id, owner, category_code: u32, timestamp)
-pub fn badge_minted(env: &Env, issuer: &Address, badge_id: u64, owner: &Address, category_code: u32) {
-    emit(
-        env,
-        symbol_short!("BADGE_MNT"),
-        (issuer.clone(), badge_id, owner.clone(), category_code, env.ledger().timestamp()),
-    );
-}
-
-/// Emitted when a contributor badge is revoked.
-/// Schema: (actor=admin, badge_id, owner, timestamp)
-pub fn badge_revoked(env: &Env, admin: &Address, badge_id: u64, owner: &Address) {
-    emit(
-        env,
-        symbol_short!("BADGE_RVK"),
-        (admin.clone(), badge_id, owner.clone(), env.ledger().timestamp()),
-    );
-}
-
-// ── Subject-Initiated Score Dispute Events ────────────────────────────────────
-
-/// Emitted when a subject (SME/debtor) files a dispute against their own score.
-/// Schema: (actor=subject, dispute_id, score_at_filing, timestamp)
-pub fn score_dispute_filed(env: &Env, subject: &Address, dispute_id: u64, score_at_filing: u32) {
-    emit(
-        env,
-        symbol_short!("SD_FILE"),
-        (subject.clone(), dispute_id, score_at_filing, env.ledger().timestamp()),
-    );
-}
-
-/// Emitted when evidence is submitted for a score dispute.
-/// Schema: (actor=subject, dispute_id, timestamp)
-pub fn score_dispute_evidence_submitted(env: &Env, subject: &Address, dispute_id: u64) {
-    emit(
-        env,
-        symbol_short!("SD_EVID"),
-        (subject.clone(), dispute_id, env.ledger().timestamp()),
-    );
-}
-
-/// Emitted when a score dispute is resolved (upheld or adjusted).
-/// Schema: (actor=resolver, dispute_id, subject, status_code: u32, timestamp)
-pub fn score_dispute_resolved(env: &Env, resolver: &Address, dispute_id: u64, subject: &Address, status_code: u32) {
-    emit(
-        env,
-        symbol_short!("SD_RESOL"),
-        (resolver.clone(), dispute_id, subject.clone(), status_code, env.ledger().timestamp()),
-    );
-}
-
-// ── Discretionary Treasury Withdrawal Events ──────────────────────────────────
-
-/// Emitted when a discretionary withdrawal proposal is submitted.
-/// Schema: (actor=proposer, proposal_id, token, recipient, amount, timestamp)
-pub fn discretionary_withdrawal_proposed(
+/// Schema: (admin, split_count, timestamp)
+pub fn sweep_splits_configured(
     env: &Env,
-    proposer: &Address,
-    proposal_id: u64,
+    admin: &Address,
+    split_count: u32,
+    timestamp: u64,
+) {
+    emit(
+        env,
+        symbol_short!("SWP_CFG"),
+        (admin.clone(), split_count, timestamp),
+    );
+}
+
+/// Schema: (token, destination, amount, timestamp)
+pub fn sweep_executed(
+    env: &Env,
     token: &Address,
-    recipient: &Address,
+    destination: &Address,
+    amount: i128,
+    timestamp: u64,
+) {
+    emit(
+        env,
+        symbol_short!("SWP_EXEC"),
+        (token.clone(), destination.clone(), amount, timestamp),
+    );
+}
+
+pub fn tranche_created(
+    env: &Env,
+    id: u64,
+    creator: &Address,
+    total_face_value: i128,
+) {
+    emit(
+        env,
+        symbol_short!("TRN_CRTD"),
+        (id, creator.clone(), total_face_value),
+    );
+}
+
+pub fn tranche_funded(
+    env: &Env,
+    tranche_id: u64,
+    investor: &Address,
     amount: i128,
 ) {
     emit(
         env,
-        symbol_short!("DW_PROP"),
+        symbol_short!("TRN_FNDD"),
+        (tranche_id, investor.clone(), amount),
+    );
+}
+
+/// Schema: (actor=admin, token, timestamp)
+pub fn token_whitelist_proposed(env: &Env, actor: &Address, token: &Address) {
+    emit(
+        env,
+        symbol_short!("TOK_WLP"),
+        (actor.clone(), token.clone(), env.ledger().timestamp()),
+    );
+}
+
+/// Schema: (actor=admin, field_tag, new_address, timestamp)
+pub fn dependency_update_proposed(env: &Env, actor: &Address, field_tag: u32, new_address: &Address) {
+    emit(
+        env,
+        symbol_short!("DEP_PROP"),
+        (actor.clone(), field_tag, new_address.clone(), env.ledger().timestamp()),
+    );
+}
+
+/// Schema: (actor=admin, field_tag, old_address, new_address, timestamp)
+pub fn dependency_updated(
+    env: &Env,
+    actor: &Address,
+    field_tag: u32,
+    old_address: &Address,
+    new_address: &Address,
+) {
+    emit(
+        env,
+        symbol_short!("DEP_EXEC"),
         (
-            proposer.clone(),
-            proposal_id,
-            token.clone(),
-            recipient.clone(),
-            amount,
+            actor.clone(),
+            field_tag,
+            old_address.clone(),
+            new_address.clone(),
             env.ledger().timestamp(),
         ),
     );
 }
 
-/// Emitted when a discretionary withdrawal proposal receives an approval.
-/// Schema: (actor=approver, proposal_id, approval_count, timestamp)
-pub fn discretionary_withdrawal_approved(
+/// Schema: (actor=investor, invoice_id, prospective_amount, cap_bps, timestamp)
+pub fn investor_concentration_exceeded(
     env: &Env,
-    approver: &Address,
-    proposal_id: u64,
-    approval_count: u32,
+    invoice_id: u64,
+    investor: &Address,
+    prospective: i128,
+    cap_bps: u32,
 ) {
     emit(
         env,
-        symbol_short!("DW_APPR"),
-        (approver.clone(), proposal_id, approval_count, env.ledger().timestamp()),
+        symbol_short!("INV_CONC"),
+        (investor.clone(), invoice_id, prospective, cap_bps, env.ledger().timestamp()),
     );
 }
 
-/// Emitted when a discretionary withdrawal is executed after quorum + timelock.
-/// Schema: (actor=executor, proposal_id, token, recipient, amount, timestamp)
-pub fn discretionary_withdrawal_executed(
+/// Schema: (actor=caller, invoice_id, old_asking_price, new_asking_price, old_deadline, new_deadline, timestamp)
+pub fn listing_amended(
     env: &Env,
-    executor: &Address,
-    proposal_id: u64,
-    token: &Address,
-    recipient: &Address,
-    amount: i128,
+    invoice_id: u64,
+    caller: &Address,
+    old_asking_price: i128,
+    new_asking_price: i128,
+    old_deadline: u64,
+    new_deadline: u64,
 ) {
     emit(
         env,
-        symbol_short!("DW_EXEC"),
+        symbol_short!("LST_AMND"),
         (
-            executor.clone(),
-            proposal_id,
-            token.clone(),
-            recipient.clone(),
-            amount,
+            caller.clone(),
+            invoice_id,
+            old_asking_price,
+            new_asking_price,
+            old_deadline,
+            new_deadline,
             env.ledger().timestamp(),
         ),
     );
 }
 
-/// Emitted when a discretionary withdrawal proposal is cancelled.
-/// Schema: (actor=admin, proposal_id, timestamp)
-pub fn discretionary_withdrawal_cancelled(env: &Env, admin: &Address, proposal_id: u64) {
-    emit(
-        env,
-        symbol_short!("DW_CXL"),
-        (admin.clone(), proposal_id, env.ledger().timestamp()),
-    );
-}

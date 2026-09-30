@@ -3,11 +3,9 @@
 use kora_shared::{
     errors::CommonError,
     events,
-    validation::{require_non_negative_amount, UPGRADE_TIMELOCK_DELAY},
+    validation::{require_non_negative_amount, require_not_self, UPGRADE_TIMELOCK_DELAY},
 };
-use soroban_sdk::{
-    contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, Vec,
-};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env};
 
 // ── Errors ────────────────────────────────────────────────────────────────────
 
@@ -16,16 +14,16 @@ use soroban_sdk::{
 #[repr(u32)]
 pub enum VestingError {
     AlreadyInitialized = 1,
-    NotInitialized = 2,
-    NotAdmin = 3,
-    InvalidGrant = 4,
-    GrantNotFound = 5,
-    InsufficientVestedBalance = 6,
-    ArithmeticOverflow = 7,
-    InvalidAddress = 8,
-    InvalidAmount = 9,
+    NotAdmin = 2,
+    NotInitialized = 3,
+    InvalidAddress = 4,
+    InvalidAmount = 5,
+    InvalidSchedule = 6,
+    GrantAlreadyExists = 7,
+    GrantNotFound = 8,
+    InsufficientVestedBalance = 9,
     GrantAlreadyRevoked = 10,
-    InvalidVestingSchedule = 11,
+    ArithmeticOverflow = 11,
     NoUpgradeProposed = 12,
     UpgradeTimelockNotElapsed = 13,
 }
@@ -45,30 +43,27 @@ impl From<CommonError> for VestingError {
 const PERSISTENT_BUMP_AMOUNT: u32 = 535_680;
 const PERSISTENT_LIFETIME_THRESHOLD: u32 = 535_680 / 2;
 
-// ── Storage Keys ─────────────────────────────────────────────────────────────
+// ── Types ─────────────────────────────────────────────────────────────────────
+
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct VestingGrant {
+    pub beneficiary: Address,
+    pub total_amount: i128,
+    pub start_time: u64,
+    pub cliff_duration: u64,
+    pub vesting_duration: u64,
+    pub released_amount: i128,
+    pub revoked: bool,
+    pub revoked_at: Option<u64>,
+}
 
 #[contracttype]
 pub enum DataKey {
     Admin,
     TokenAddress,
-    Grant(Address),         // beneficiary -> VestingGrant
-    UpgradeProposal,        // (wasm_hash, proposed_at)
-}
-
-// ── Data Types ───────────────────────────────────────────────────────────────
-
-/// A vesting grant for a specific beneficiary with cliff and linear vesting.
-#[contracttype]
-#[derive(Clone, Debug, Eq, PartialEq)]
-pub struct VestingGrant {
-    pub beneficiary: Address,
-    pub total_amount: i128,
-    pub released_amount: i128,
-    pub start_time: u64,
-    pub cliff_duration: u64,      // seconds until first vest
-    pub vesting_duration: u64,    // total duration including cliff
-    pub revoked: bool,
-    pub revoked_at: u64,          // timestamp of revocation (0 if not revoked)
+    Grant(Address),
+    UpgradeProposal,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -78,43 +73,48 @@ pub struct VestingContract;
 
 #[contractimpl]
 impl VestingContract {
-    /// Initialize the vesting contract with admin and token address.
-    ///
-    /// **Parameters:**
-    /// - `admin` — The address that will administer this contract.
-    /// - `token` — The token contract address for vested allocations.
-    ///
-    /// **Errors:**
-    /// - `VestingError::AlreadyInitialized` — Contract has already been initialized.
-    /// - `VestingError::InvalidAddress` — Admin or token is the contract's own address.
-    pub fn initialize(
-        env: Env,
-        admin: Address,
-        token: Address,
-    ) -> Result<(), VestingError> {
+    /// Initialize the vesting contract with an admin and token address.
+    pub fn initialize(env: Env, admin: Address, token: Address) -> Result<(), VestingError> {
         if env.storage().persistent().has(&DataKey::Admin) {
             return Err(VestingError::AlreadyInitialized);
         }
-        kora_shared::validation::require_not_self(&env, &admin)?;
-        kora_shared::validation::require_not_self(&env, &token)?;
+        require_not_self(&env, &admin)?;
+        require_not_self(&env, &token)?;
 
         env.storage().persistent().set(&DataKey::Admin, &admin);
-        env.storage().persistent().extend_ttl(
-            &DataKey::Admin,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::bump_persistent(&env, &DataKey::Admin);
 
         env.storage().persistent().set(&DataKey::TokenAddress, &token);
-        env.storage().persistent().extend_ttl(
-            &DataKey::TokenAddress,
-            PERSISTENT_LIFETIME_THRESHOLD,
-            PERSISTENT_BUMP_AMOUNT,
-        );
+        Self::bump_persistent(&env, &DataKey::TokenAddress);
 
         Ok(())
     }
 
+    /// Create a new vesting grant for a beneficiary.
+    pub fn create_grant(
+        env: Env,
+        admin: Address,
+        beneficiary: Address,
+        total_amount: i128,
+        start_time: u64,
+        cliff_duration: u64,
+        vesting_duration: u64,
+    ) -> Result<(), VestingError> {
+        admin.require_auth();
+        Self::require_admin(&env, &admin)?;
+        require_not_self(&env, &beneficiary)?;
+        require_non_negative_amount(total_amount)?;
+
+        if total_amount <= 0 {
+            return Err(VestingError::InvalidAmount);
+        }
+        if vesting_duration <= cliff_duration {
+            return Err(VestingError::InvalidSchedule);
+        }
+
+        let key = DataKey::Grant(beneficiary.clone());
+        if env.storage().persistent().has(&key) {
+            return Err(
     /// Create a new vesting grant for a beneficiary. Admin only.
     ///
     /// **Parameters:**

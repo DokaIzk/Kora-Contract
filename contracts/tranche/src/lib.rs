@@ -8,7 +8,7 @@
 use kora_shared::{
     errors::CommonError,
     events,
-    types::{Invoice, Pool, Position},
+    types::Position,
     validation::require_non_zero_amount,
 };
 use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Env, Vec};
@@ -113,7 +113,7 @@ impl TrancheContract {
         let mut total_face_value: i128 = 0;
         for i in 0..invoice_ids.len() {
             let invoice_id = invoice_ids.get(i).unwrap();
-            let invoice = nft_client.get_invoice(&invoice_id)?;
+            let invoice = nft_client.get_invoice(&invoice_id);
             total_face_value = total_face_value
                 .checked_add(invoice.amount)
                 .ok_or(TrancheError::ArithmeticOverflow)?;
