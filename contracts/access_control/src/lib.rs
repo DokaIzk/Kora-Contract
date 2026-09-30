@@ -2,13 +2,13 @@
 
 use kora_shared::{
     audit::{AdminActionType, AdminAuditEntry, AuditSource, MAX_AUDIT_LOG_SIZE},
-    errors::CommonError,
+    errors::{CommonError, KoraError},
     events,
     reentrancy::ReentrancyGuard,
     types::{AdminAction, CommunityProposal, MultisigConfig, ParameterKey, ParameterProposal, Proposal, RecoveryProposal},
     validation::UPGRADE_TIMELOCK_DELAY,
 };
-use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, Vec};
+use soroban_sdk::{contract, contracterror, contractimpl, contracttype, Address, Bytes, BytesN, Env, IntoVal, String, Vec};
 
 // ── Errors ───────────────────────────────────────────────────────────────────
 
@@ -24,7 +24,6 @@ pub enum AccessControlError {
     AlreadyPaused = 3,
     AlreadyVoted = 4,
     ArithmeticOverflow = 5,
-    DirectCallProhibited = 51,
     GovernanceThresholdNotMet = 6,
     GovernanceTimelockNotElapsed = 7,
     InvalidAddress = 8,
@@ -57,6 +56,12 @@ pub enum AccessControlError {
     NotGuardian = 32,
     /// Emergency pause cannot be triggered (guardian required).
     GuardianEmergencyPauseFailed = 33,
+    /// Cannot delegate vote to self.
+    CannotDelegateToSelf = 34,
+    /// Delegate is not a configured signer.
+    DelegateNotSigner = 35,
+    /// No delegation exists to revoke.
+    NoDelegationExists = 36,
 }
 
 impl From<CommonError> for AccessControlError {
@@ -125,6 +130,11 @@ pub enum DataKey {
     NextRecoveryProposalId,
     /// Address of the dispute_resolution contract for governance-gated resolution (Issue #671).
     DisputeResolution,
+    // ── Emergency pause governance (#669) ──────────────────────────────────────
+    /// Timestamp of the last emergency pause triggered by a guardian.
+    LastEmergencyPauseTime,
+    /// Guardian who triggered the current emergency pause (if any).
+    EmergencyPauseInitiator,
     // ── Community Proposals (Issue #672) ──────────────────────────────────────
     /// Pending community proposal awaiting signer sponsorship, keyed by id.
     CommunityProposal(u64),
@@ -476,7 +486,7 @@ impl AccessControlContract {
             .remove(&DataKey::Role(current_admin.clone()));
         events::admin_transferred(&env, &current_admin, &new_admin);
         let details = Bytes::new(&env);
-        Self::append_audit_entry(&env, &current_admin, AdminActionType::TransferAdmin, details);
+        Self::append_audit_entry(&env, &current_admin, AdminActionType::TransferAdmin, details.into());
         Ok(())
     }
 
@@ -551,7 +561,7 @@ impl AccessControlContract {
     /// Cancel a pending admin proposal. Current admin only.
     pub fn cancel_admin_proposal(env: Env, admin: Address) -> Result<(), KoraError> {
         admin.require_auth();
-        Self::require_admin(&env, &admin)?;
+        Self::require_admin(&env, &admin).map_err(|_| KoraError::NotAdmin)?;
         if !env.storage().instance().has(&DataKey::PendingAdmin) {
             return Err(KoraError::NoPendingAdminProposal);
         }
@@ -606,7 +616,7 @@ impl AccessControlContract {
 
         events::multisig_configured(&env, threshold, signer_count);
         let details = Bytes::new(&env);
-        Self::append_audit_entry(&env, &admin, AdminActionType::ConfigureMultisig, details);
+        Self::append_audit_entry(&env, &admin, AdminActionType::ConfigureMultisig, details.into());
         Ok(())
     }
 
@@ -881,12 +891,20 @@ impl AccessControlContract {
             AdminAction::ResolveDispute(resolver, invoice_id, upheld) => {
                 // Issue #671: Governance-gated dispute resolution
                 // Route through dispute_resolution contract if available
-                if let Ok(Some(dispute_resolution)) = env.storage()
+                if let Some(dispute_resolution) = env.storage()
                     .persistent()
-                    .get::<DataKey, Option<Address>>(&DataKey::DisputeResolution)
+                    .get::<DataKey, Address>(&DataKey::DisputeResolution)
                 {
-                    let dr_client = kora_dispute_resolution::DisputeResolutionContractClient::new(&env, &dispute_resolution);
-                    dr_client.resolve_dispute(&resolver, &invoice_id, &upheld)?;
+                    let _: () = env.invoke_contract(
+                        &dispute_resolution,
+                        &soroban_sdk::Symbol::new(&env, "resolve_dispute"),
+                        soroban_sdk::vec![
+                            &env,
+                            resolver.into_val(&env),
+                            invoice_id.into_val(&env),
+                            upheld.into_val(&env),
+                        ],
+                    );
                 }
                 events::action_executed(&env, proposal_id, &executor);
             }
@@ -894,7 +912,7 @@ impl AccessControlContract {
 
         events::action_executed(&env, proposal_id, &executor);
         let details = Bytes::new(&env);
-        Self::append_audit_entry(&env, &executor, AdminActionType::MultisigExecuteAction, details);
+        Self::append_audit_entry(&env, &executor, AdminActionType::MultisigExecuteAction, details.into());
         Ok(())
     }
 
@@ -1063,6 +1081,23 @@ impl AccessControlContract {
                                 .remove(&DataKey::Role(current_admin.clone()));
                             events::admin_rotated(&env, &executor, &current_admin, new_admin);
                         }
+                        AdminAction::ResolveDispute(resolver, invoice_id, upheld) => {
+                            if let Some(dispute_resolution) = env.storage()
+                                .persistent()
+                                .get::<DataKey, Address>(&DataKey::DisputeResolution)
+                            {
+                                let _: () = env.invoke_contract(
+                                    &dispute_resolution,
+                                    &soroban_sdk::Symbol::new(&env, "resolve_dispute"),
+                                    soroban_sdk::vec![
+                                        &env,
+                                        resolver.into_val(&env),
+                                        invoice_id.into_val(&env),
+                                        upheld.into_val(&env),
+                                    ],
+                                );
+                            }
+                        }
                     }
 
                     events::action_executed(&env, proposal_id, &executor);
@@ -1071,7 +1106,7 @@ impl AccessControlContract {
         }
 
         let details = Bytes::new(&env);
-        Self::append_audit_entry(&env, &executor, AdminActionType::MultisigExecuteAction, details);
+        Self::append_audit_entry(&env, &executor, AdminActionType::MultisigExecuteAction, details.into());
         Ok(())
     }
 
@@ -1155,7 +1190,7 @@ impl AccessControlContract {
 
         events::action_proposed(&env, proposal_id, &proposer);
         let details = Bytes::new(&env);
-        Self::append_audit_entry(&env, &proposer, AdminActionType::ProposeParameter, details);
+        Self::append_audit_entry(&env, &proposer, AdminActionType::ProposeParameter, details.into());
         Ok(proposal_id)
     }
 
@@ -1265,7 +1300,7 @@ impl AccessControlContract {
 
         events::action_executed(&env, proposal_id, &caller);
         let details = Bytes::new(&env);
-        Self::append_audit_entry(&env, &caller, AdminActionType::ExecuteParameter, details);
+        Self::append_audit_entry(&env, &caller, AdminActionType::ExecuteParameter, details.into());
         Ok(())
     }
 
@@ -1572,7 +1607,7 @@ impl AccessControlContract {
 
         events::action_proposed(&env, proposal_id, &proposer);
         let details = Bytes::new(&env);
-        Self::append_audit_entry(&env, &proposer, AdminActionType::ProposeParameter, details);
+        Self::append_audit_entry(&env, &proposer, AdminActionType::ProposeParameter, details.into());
         Ok(proposal_id)
     }
 
@@ -1656,7 +1691,7 @@ impl AccessControlContract {
 
         events::action_executed(&env, proposal_id, &executor);
         let details = Bytes::new(&env);
-        Self::append_audit_entry(&env, &executor, AdminActionType::ConfigureMultisig, details);
+        Self::append_audit_entry(&env, &executor, AdminActionType::ConfigureMultisig, details.into());
         Ok(())
     }
 
@@ -1764,7 +1799,7 @@ impl AccessControlContract {
     ///
     /// **Security:** Read-only view. No authorization required.
     pub fn get_delegators(env: Env, delegate: Address) -> Vec<Address> {
-        Self::get_delegators(&env, &delegate)
+        Self::internal_get_delegators(&env, &delegate)
     }
 
     // ── Views ─────────────────────────────────────────────────────────────────
@@ -1881,7 +1916,7 @@ impl AccessControlContract {
         );
         events::upgrade_proposed(&env, &admin, &new_wasm_hash);
         let details = Bytes::new(&env);
-        Self::append_audit_entry(&env, &admin, AdminActionType::ProposeUpgrade, details);
+        Self::append_audit_entry(&env, &admin, AdminActionType::ProposeUpgrade, details.into());
         Ok(())
     }
 
@@ -1911,7 +1946,7 @@ impl AccessControlContract {
         env.storage().instance().remove(&DataKey::UpgradeProposal);
         events::upgrade_executed(&env, &admin, &wasm_hash);
         let details = Bytes::new(&env);
-        Self::append_audit_entry(&env, &admin, AdminActionType::ExecuteUpgrade, details);
+        Self::append_audit_entry(&env, &admin, AdminActionType::ExecuteUpgrade, details.into());
         env.deployer().update_current_contract_wasm(wasm_hash);
         Ok(())
     }
@@ -2206,19 +2241,19 @@ impl AccessControlContract {
     }
 
     /// Get list of signers delegated to a specific delegate.
-    fn get_delegators(env: &Env, delegate: &Address) -> Vec<Address> {
+    fn internal_get_delegators(env: &Env, delegate: &Address) -> Vec<Address> {
         env.storage()
             .persistent()
             .get(&DataKey::Delegators(delegate.clone()))
-            .unwrap_or_else(|_| Vec::new(env))
+            .unwrap_or_else(|| Vec::new(env))
     }
 
     /// Add a signer to the delegators list for a delegate.
     fn add_delegator(env: &Env, delegate: &Address, signer: &Address) {
-        let mut delegators = Self::get_delegators(env, delegate);
+        let mut delegators = Self::internal_get_delegators(env, delegate);
         // Avoid duplicates
         for i in 0..delegators.len() {
-            if delegators.get(i).ok_or(AccessControlError::Unauthorized).unwrap() == signer {
+            if &delegators.get(i).unwrap() == signer {
                 return; // Already in list
             }
         }
@@ -2231,13 +2266,12 @@ impl AccessControlContract {
 
     /// Remove a signer from the delegators list for a delegate.
     fn remove_delegator(env: &Env, delegate: &Address, signer: &Address) {
-        let mut delegators = Self::get_delegators(env, delegate);
+        let delegators = Self::internal_get_delegators(env, delegate);
         let mut new_delegators = Vec::new(env);
         for i in 0..delegators.len() {
-            if delegators.get(i).ok_or(AccessControlError::Unauthorized).unwrap() != signer {
-                if let Ok(addr) = delegators.get(i).ok_or(AccessControlError::Unauthorized) {
-                    new_delegators.push_back(addr);
-                }
+            let addr = delegators.get(i).unwrap();
+            if &addr != signer {
+                new_delegators.push_back(addr);
             }
         }
         if new_delegators.is_empty() {

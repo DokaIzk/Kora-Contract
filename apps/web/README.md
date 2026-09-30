@@ -26,6 +26,15 @@ Responsive mobile-first user interface and front-end integration layer for Kora 
 - **Failure Blocking**: Blocks signature prompts when a transaction simulation fails or exceeds limits, preventing wasted gas and failed executions.
 - **Components**: `SimulationPreviewModal`, `SimulationResultView`, `SimulationContext`, `simulationService`.
 
+### 5. Wave Contributor Dashboard
+- **Public Transparency**: Tracks Wave-style contributor initiatives with full visibility from GitHub to on-chain payouts.
+- **Issue Tracking**: Real-time sync with GitHub issues, complexity-based points (Low: 50, Medium: 100, High: 200), status tracking.
+- **Payout Transparency**: Cross-references GitHub issues with on-chain treasury disbursements, shows transaction hashes.
+- **Contributor Leaderboard**: Rankings by total points earned, completed issues, disbursed vs pending payouts.
+- **Program Statistics**: Completion rates, disbursement rates, active contributor counts, visual breakdowns.
+- **Components**: `WaveDashboard`, `WaveIssueList`, `ContributorLeaderboard`, `WaveStatsOverview`, `waveService`.
+- **Documentation**: See `README_WAVE.md` for detailed guide.
+
 ## Verification & Testing
 Run unit tests and verification via:
 ```bash

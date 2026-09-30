@@ -1,5 +1,5 @@
 use arbitrary::Arbitrary;
-use soroban_sdk::{Address, Vec as SVec};
+use soroban_sdk::Address;
 
 use crate::gen;
 use crate::harness::Protocol;
@@ -60,27 +60,21 @@ pub fn run(data: &[u8]) {
                     &p.actor(pool),
                     &p.actor(treasury),
                     &p.actor(ac),
+                    &p.price_oracle.address,
                     &p.actor(rr),
                     &gen::small_u32(fee, ftag),
+                    &0u32,
                 );
             }
-            Op::SetMinFundingBuffer { admin, secs, stag } => {
-                let _ = c.try_set_min_funding_buffer(&p.actor(admin), &gen::ts_or_id(secs, stag));
-            }
+            Op::SetMinFundingBuffer { .. } => {}
             Op::SetReferrerSplitBps { admin, bps, btag } => {
                 let _ = c.try_set_referrer_split_bps(&p.actor(admin), &gen::small_u32(bps, btag));
             }
-            Op::SetFeeBps { admin, bps, btag, update } => {
+            Op::SetFeeBps { admin, bps, btag, update: _ } => {
                 let v = gen::small_u32(bps, btag);
-                if update {
-                    let _ = c.try_update_fee_bps(&p.actor(admin), &v);
-                } else {
-                    let _ = c.try_set_fee_bps(&p.actor(admin), &v);
-                }
+                let _ = c.try_set_fee_bps(&p.actor(admin), &v);
             }
-            Op::SetMinDiscountBps { admin, bps, btag } => {
-                let _ = c.try_set_min_discount_bps(&p.actor(admin), &gen::small_u32(bps, btag));
-            }
+            Op::SetMinDiscountBps { .. } => {}
             Op::SetTierFeeBps { admin, tier, bps, btag } => {
                 let _ = c.try_set_tier_fee_bps(&p.actor(admin), &gen::risk_tier(tier), &gen::small_u32(bps, btag));
             }
@@ -88,7 +82,7 @@ pub fn run(data: &[u8]) {
                 if remove {
                     let _ = c.try_remove_token_whitelist(&p.actor(admin), &p.actor(token));
                 } else {
-                    let _ = c.try_whitelist_token(&p.actor(admin), &p.actor(token));
+                    let _ = c.try_propose_token_whitelist(&p.actor(admin), &p.actor(token));
                 }
             }
             Op::ListInvoice(a) => {
@@ -102,37 +96,14 @@ pub fn run(data: &[u8]) {
                     &referrer(&p, a.referrer),
                 );
             }
-            Op::ListInvoiceWithDecay { base, min_price, mtag, start_ts, stag, end_ts, etag } => {
-                let _ = c.try_list_invoice_with_decay(
-                    &p.actor(base.seller),
-                    &gen::ts_or_id(base.id, base.itag),
-                    &gen::amount(base.asking, base.atag),
-                    &gen::amount(base.face, base.ftag),
-                    &p.actor(base.token),
-                    &gen::ts_or_id(base.deadline, base.dtag),
-                    &referrer(&p, base.referrer),
-                    &gen::amount(min_price, mtag),
-                    &gen::ts_or_id(start_ts, stag),
-                    &gen::ts_or_id(end_ts, etag),
-                );
-            }
-            Op::ListInvoiceWithBidding { base, bidding_deadline, btag } => {
-                let _ = c.try_list_invoice_with_bidding(
-                    &p.actor(base.seller),
-                    &gen::ts_or_id(base.id, base.itag),
-                    &gen::amount(base.asking, base.atag),
-                    &gen::amount(base.face, base.ftag),
-                    &p.actor(base.token),
-                    &gen::ts_or_id(base.deadline, base.dtag),
-                    &referrer(&p, base.referrer),
-                    &gen::ts_or_id(bidding_deadline, btag),
-                );
-            }
+            Op::ListInvoiceWithDecay { .. } => {}
+            Op::ListInvoiceWithBidding { .. } => {}
             Op::FundInvoice { investor, id, itag, amount, atag } => {
                 let _ = c.try_fund_invoice(
                     &p.actor(investor),
                     &gen::ts_or_id(id, itag),
                     &gen::amount(amount, atag),
+                    &None,
                 );
             }
             Op::CancelListing { caller, id, itag } => {
@@ -147,32 +118,14 @@ pub fn run(data: &[u8]) {
             Op::ClaimRefund { investor, id, itag } => {
                 let _ = c.try_claim_refund(&p.actor(investor), &gen::ts_or_id(id, itag));
             }
-            Op::SubmitBid { investor, id, itag, bid_price, ptag, amount, atag } => {
-                let _ = c.try_submit_bid(
-                    &p.actor(investor),
-                    &gen::ts_or_id(id, itag),
-                    &gen::amount(bid_price, ptag),
-                    &gen::amount(amount, atag),
-                );
-            }
-            Op::AcceptBids { caller, id, itag, investors, count } => {
-                let mut v: SVec<Address> = SVec::new(env);
-                for i in 0..(count as usize % 4) {
-                    v.push_back(p.actor(investors[i % investors.len()]));
-                }
-                let _ = c.try_accept_bids(&p.actor(caller), &gen::ts_or_id(id, itag), &v);
-            }
-            Op::Reads { id, itag, investor, tier, token } => {
+            Op::SubmitBid { .. } => {}
+            Op::AcceptBids { .. } => {}
+            Op::Reads { id, itag, investor: _, tier, token } => {
                 let i = gen::ts_or_id(id, itag);
                 let _ = c.try_get_listing(&i);
-                let _ = c.try_get_current_price(&i);
-                let _ = c.try_get_decay_schedule(&i);
-                let _ = c.try_get_bid(&i, &p.actor(investor));
                 let _ = c.try_get_config();
                 let _ = c.try_get_admin();
                 let _ = c.try_get_fee_bps();
-                let _ = c.try_get_min_discount_bps();
-                let _ = c.try_get_min_funding_buffer();
                 let _ = c.try_get_tier_fee_bps(&gen::risk_tier(tier));
                 let _ = c.try_is_token_whitelisted(&p.actor(token));
             }

@@ -786,6 +786,7 @@ dependencies = [
  "kora-access-control",
  "kora-financing-pool",
  "kora-invoice-nft",
+ "kora-price-oracle",
  "kora-risk-registry",
  "kora-shared",
  "kora-treasury",
@@ -835,6 +836,7 @@ dependencies = [
 name = "kora-tranche"
 version = "0.1.0"
 dependencies = [
+ "kora-invoice-nft",
  "kora-shared",
  "soroban-sdk",
 ]
@@ -844,6 +846,7 @@ name = "kora-treasury"
 version = "0.1.0"
 dependencies = [
  "kora-access-control",
+ "kora-price-oracle",
  "kora-shared",
  "soroban-sdk",
 ]
@@ -1268,21 +1271,6 @@ name = "ryu"
 version = "1.0.23"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9774ba4a74de5f7b1c1451ed6cd5285a32eddb5cccb8cc655a4e50009e06477f"
-
-[[package]]
-name = "same-file"
-version = "1.0.6"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "93fc1dc3aaa9bfed95e02e6eadabb4baf7e3078b0bd1b4d7b6b0b68378900502"
-dependencies = [
- "winapi-util",
-]
-
-[[package]]
-name = "scopeguard"
-version = "1.2.0"
-source = "registry+https://github.com/rust-lang/crates.io-index"
-checksum = "94143f37725109f92c262ed2cf5e59bce7498c01bcc1502d7b9afe439a4e9f49"
 
 [[package]]
 name = "sec1"

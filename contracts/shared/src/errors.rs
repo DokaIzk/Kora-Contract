@@ -142,6 +142,13 @@ pub enum KoraError {
 
     // invoice_nft: per-SME mint rate limit exceeded
     MintRateLimitExceeded = 161,
+
+    // treasury fee sweep (#742)
+    SweepSplitsNotConfigured = 162,
+    InvalidSweepSplits = 163,
+
+    // circuit breaker (#743)
+    CircuitBreakerTripped = 164,
 }
 
 /// Common validation/arithmetic errors shared by every contract's
@@ -172,4 +179,22 @@ pub enum CommonError {
     Reentrancy = 12,
     InvalidLength = 13,
     BatchSizeExceeded = 14,
+}
+
+impl From<CommonError> for KoraError {
+    fn from(e: CommonError) -> Self {
+        match e {
+            CommonError::InvalidAmount => KoraError::InvalidAmount,
+            CommonError::InvalidDueDate => KoraError::InvalidDueDate,
+            CommonError::InvalidRiskScore => KoraError::InvalidRiskScore,
+            CommonError::InvalidCid => KoraError::InvalidCid,
+            CommonError::InvalidFeeRate => KoraError::InvalidFeeRate,
+            CommonError::InvalidAddress => KoraError::InvalidAddress,
+            CommonError::ArithmeticOverflow => KoraError::ArithmeticOverflow,
+            CommonError::ArithmeticUnderflow => KoraError::ArithmeticUnderflow,
+            CommonError::Reentrancy => KoraError::Reentrancy,
+            CommonError::BatchSizeExceeded => KoraError::BatchSizeExceeded,
+            _ => KoraError::InvalidAmount,
+        }
+    }
 }
