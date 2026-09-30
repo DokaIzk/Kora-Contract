@@ -136,7 +136,25 @@ export class WalletManager {
       installUrl: undefined,
     });
 
-    if (!(await adapter.isInstalled())) {
+    let installed: boolean;
+    try {
+      installed = await adapter.isInstalled();
+    } catch (error) {
+      if (token !== this.operation) return this.getState();
+      this.setState({
+        status: 'error',
+        walletId,
+        address: null,
+        walletNetwork: 'unknown',
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Wallet availability check failed.',
+      });
+      return this.getState();
+    }
+
+    if (!installed) {
       if (token !== this.operation) return this.getState();
 
       this.setState({
@@ -155,8 +173,13 @@ export class WalletManager {
       if (token !== this.operation) return this.getState();
 
       this.applyConnection(walletId, connection);
-      persistLastWallet(this.storage, walletId);
-      this.startAdapterSubscription(adapter);
+      if (
+        this.state.status === 'connected' ||
+        this.state.status === 'network-mismatch'
+      ) {
+        persistLastWallet(this.storage, walletId);
+        this.startAdapterSubscription(adapter);
+      }
     } catch (error) {
       if (token !== this.operation) return this.getState();
 
@@ -185,7 +208,25 @@ export class WalletManager {
     const token = ++this.operation;
     this.stopAdapterSubscription();
 
-    if (!(await adapter.isInstalled())) {
+    let installed: boolean;
+    try {
+      installed = await adapter.isInstalled();
+    } catch (error) {
+      if (token !== this.operation) return this.getState();
+      this.setState({
+        status: 'error',
+        walletId,
+        address: null,
+        walletNetwork: 'unknown',
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Wallet availability check failed.',
+      });
+      return this.getState();
+    }
+
+    if (!installed) {
       if (token !== this.operation) return this.getState();
 
       this.setState({
@@ -199,7 +240,23 @@ export class WalletManager {
       return this.getState();
     }
 
-    const restored = await adapter.restore();
+    let restored: WalletSession | null;
+    try {
+      restored = await adapter.restore();
+    } catch (error) {
+      if (token !== this.operation) return this.getState();
+      this.setState({
+        status: 'error',
+        walletId,
+        address: null,
+        walletNetwork: 'unknown',
+        error:
+          error instanceof Error
+            ? error.message
+            : 'Wallet session restore failed.',
+      });
+      return this.getState();
+    }
     if (token !== this.operation) return this.getState();
 
     if (!restored) {
@@ -215,7 +272,12 @@ export class WalletManager {
     }
 
     this.applyConnection(walletId, restored);
-    this.startAdapterSubscription(adapter);
+    if (
+      this.state.status === 'connected' ||
+      this.state.status === 'network-mismatch'
+    ) {
+      this.startAdapterSubscription(adapter);
+    }
     return this.getState();
   }
 

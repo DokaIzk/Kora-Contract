@@ -495,6 +495,233 @@ describe('WalletManager defensive paths', () => {
     expect(state.error).toContain('empty account');
   });
 
+
+  it('does not persist or subscribe to invalid unknown-network sessions', async () => {
+    const storage = new MemoryStorage();
+    const adapter = new FakeAdapter('freighter', {
+      address: testnetConnection.address,
+      network: 'unknown',
+    });
+    const manager = new WalletManager([adapter], 'testnet', storage);
+
+    const state = await manager.connect('freighter');
+
+    expect(state.status).toBe('error');
+    expect(storage.getItem(LAST_WALLET_STORAGE_KEY)).toBeNull();
+    expect(adapter.unsubscribed).toBe(false);
+  });
+
+  it('maps install-check failures into state instead of rejecting connect', async () => {
+    const adapter: WalletAdapter = {
+      id: 'freighter',
+      label: 'Freighter',
+      installUrl: 'https://www.freighter.app/',
+      isInstalled: async () => {
+        throw new Error('extension bridge unavailable');
+      },
+      connect: async () => testnetConnection,
+      restore: async () => null,
+      disconnect: async () => undefined,
+      subscribe: () => () => undefined,
+    };
+    const manager = new WalletManager([adapter], 'testnet', new MemoryStorage());
+
+    await expect(manager.connect('freighter')).resolves.toMatchObject({
+      status: 'error',
+      error: 'extension bridge unavailable',
+    });
+  });
+
+  it('maps restore failures into state instead of rejecting reconnect', async () => {
+    const storage = new MemoryStorage();
+    storage.setItem(LAST_WALLET_STORAGE_KEY, 'freighter');
+    const adapter: WalletAdapter = {
+      id: 'freighter',
+      label: 'Freighter',
+      installUrl: 'https://www.freighter.app/',
+      isInstalled: async () => true,
+      connect: async () => testnetConnection,
+      restore: async () => {
+        throw new Error('restore bridge unavailable');
+      },
+      disconnect: async () => undefined,
+      subscribe: () => () => undefined,
+    };
+    const manager = new WalletManager([adapter], 'testnet', storage);
+
+    await expect(manager.reconnectLastUsed()).resolves.toMatchObject({
+      status: 'error',
+      error: 'restore bridge unavailable',
+    });
+  });
+
+
+  it('uses generic messages for opaque availability and restore failures', async () => {
+    const connectAdapter: WalletAdapter = {
+      id: 'freighter',
+      label: 'Freighter',
+      installUrl: 'https://www.freighter.app/',
+      isInstalled: async () => {
+        throw { code: 'bridge-down' };
+      },
+      connect: async () => testnetConnection,
+      restore: async () => null,
+      disconnect: async () => undefined,
+      subscribe: () => () => undefined,
+    };
+    const connectManager = new WalletManager(
+      [connectAdapter],
+      'testnet',
+      new MemoryStorage(),
+    );
+    expect(await connectManager.connect('freighter')).toMatchObject({
+      status: 'error',
+      error: 'Wallet availability check failed.',
+    });
+
+    const storage = new MemoryStorage();
+    storage.setItem(LAST_WALLET_STORAGE_KEY, 'freighter');
+    const restoreAdapter: WalletAdapter = {
+      ...connectAdapter,
+      isInstalled: async () => true,
+      restore: async () => {
+        throw { code: 'restore-failed' };
+      },
+    };
+    const restoreManager = new WalletManager(
+      [restoreAdapter],
+      'testnet',
+      storage,
+    );
+    expect(await restoreManager.reconnectLastUsed()).toMatchObject({
+      status: 'error',
+      error: 'Wallet session restore failed.',
+    });
+  });
+
+  it('ignores late availability failures after disconnect for connect and reconnect', async () => {
+    let rejectConnectInstalled: ((reason: Error) => void) | undefined;
+    const connectAdapter: WalletAdapter = {
+      id: 'freighter',
+      label: 'Freighter',
+      installUrl: 'https://www.freighter.app/',
+      isInstalled: () =>
+        new Promise<boolean>((_resolve, reject) => {
+          rejectConnectInstalled = reject;
+        }),
+      connect: async () => testnetConnection,
+      restore: async () => null,
+      disconnect: async () => undefined,
+      subscribe: () => () => undefined,
+    };
+    const connectManager = new WalletManager(
+      [connectAdapter],
+      'testnet',
+      new MemoryStorage(),
+    );
+    const pendingConnect = connectManager.connect('freighter');
+    await connectManager.disconnect();
+    rejectConnectInstalled?.(new Error('late availability failure'));
+    await pendingConnect;
+    expect(connectManager.getState().status).toBe('disconnected');
+
+    const storage = new MemoryStorage();
+    storage.setItem(LAST_WALLET_STORAGE_KEY, 'freighter');
+    let rejectReconnectInstalled: ((reason: Error) => void) | undefined;
+    const reconnectAdapter: WalletAdapter = {
+      ...connectAdapter,
+      isInstalled: () =>
+        new Promise<boolean>((_resolve, reject) => {
+          rejectReconnectInstalled = reject;
+        }),
+    };
+    const reconnectManager = new WalletManager(
+      [reconnectAdapter],
+      'testnet',
+      storage,
+    );
+    const pendingReconnect = reconnectManager.reconnectLastUsed();
+    await reconnectManager.disconnect();
+    rejectReconnectInstalled?.(new Error('late availability failure'));
+    await pendingReconnect;
+    expect(reconnectManager.getState().status).toBe('disconnected');
+  });
+
+  it('ignores late restore failures after disconnect', async () => {
+    const storage = new MemoryStorage();
+    storage.setItem(LAST_WALLET_STORAGE_KEY, 'freighter');
+    let rejectRestore: ((reason: Error) => void) | undefined;
+    const adapter: WalletAdapter = {
+      id: 'freighter',
+      label: 'Freighter',
+      installUrl: 'https://www.freighter.app/',
+      isInstalled: async () => true,
+      connect: async () => testnetConnection,
+      restore: () =>
+        new Promise<WalletSession | null>((_resolve, reject) => {
+          rejectRestore = reject;
+        }),
+      disconnect: async () => undefined,
+      subscribe: () => () => undefined,
+    };
+    const manager = new WalletManager([adapter], 'testnet', storage);
+
+    const pending = manager.reconnectLastUsed();
+    await Promise.resolve();
+    await manager.disconnect();
+    rejectRestore?.(new Error('late restore failure'));
+    await pending;
+
+    expect(manager.getState().status).toBe('disconnected');
+  });
+
+  it('does not subscribe when a restored session has an unknown network', async () => {
+    const storage = new MemoryStorage();
+    storage.setItem(LAST_WALLET_STORAGE_KEY, 'freighter');
+    const adapter = new FakeAdapter('freighter', testnetConnection);
+    adapter.restoreConnection = {
+      address: testnetConnection.address,
+      network: 'unknown',
+    };
+    const manager = new WalletManager([adapter], 'testnet', storage);
+
+    const state = await manager.reconnectLastUsed();
+
+    expect(state.status).toBe('error');
+    expect(state.error).toContain('could not be determined');
+    expect(adapter.unsubscribed).toBe(false);
+  });
+
+  it('uses constructor defaults and tolerates a throwing browser localStorage getter', () => {
+    const originalWindow = (globalThis as { window?: unknown }).window;
+    Object.defineProperty(globalThis, 'window', {
+      configurable: true,
+      value: Object.defineProperty({}, 'localStorage', {
+        get() {
+          throw new Error('storage access denied');
+        },
+      }),
+    });
+
+    try {
+      const adapter = new FakeAdapter('freighter', testnetConnection);
+      const manager = new WalletManager([adapter]);
+      expect(manager.getState()).toMatchObject({
+        expectedNetwork: 'testnet',
+        walletId: null,
+      });
+    } finally {
+      if (originalWindow === undefined) {
+        delete (globalThis as { window?: unknown }).window;
+      } else {
+        Object.defineProperty(globalThis, 'window', {
+          configurable: true,
+          value: originalWindow,
+        });
+      }
+    }
+  });
+
   it('disconnects safely even when no wallet is active', async () => {
     const manager = new WalletManager([], 'mainnet', new MemoryStorage());
 

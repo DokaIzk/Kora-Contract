@@ -41,6 +41,9 @@ export const WalletProvider: React.FC<WalletProviderProps> = ({
 
   useEffect(() => {
     walletManager.setExpectedNetwork(expectedNetwork);
+  }, [walletManager, expectedNetwork]);
+
+  useEffect(() => {
     const unsubscribe = walletManager.subscribe(setState);
     void walletManager.reconnectLastUsed();
 
@@ -48,7 +51,7 @@ export const WalletProvider: React.FC<WalletProviderProps> = ({
       unsubscribe();
       if (!manager) walletManager.dispose();
     };
-  }, [walletManager, expectedNetwork, manager]);
+  }, [walletManager, manager]);
 
   const value: WalletContextValue = {
     ...state,
