@@ -16,11 +16,12 @@ pub mod verification {
 use kora_shared::{
     errors::CommonError,
     events,
-    types::{EarlySettlementOffer, InstallmentSchedule, Pool, Position, PositionSaleOffer, ProtocolStats, RepaymentApproval},
-    types::{EarlySettlementOffer, InstallmentSchedule, Pool, Position, PositionSaleOffer, PositionShare, ProtocolStats, ShareSaleOffer},
+    types::{
+        EarlySettlementOffer, InstallmentSchedule, Pool, Position,
+        PositionSaleOffer, PositionShare, ProtocolStats, RepaymentApproval, ShareSaleOffer,
+    },
     validation::{bps_of, bps_of_normalized, require_valid_bps_range, UPGRADE_TIMELOCK_DELAY},
 };
-use kora_marketplace::MarketplaceContractClient;
 use soroban_sdk::{
     contract, contracterror, contractimpl, contracttype, token, Address, BytesN, Env, IntoVal, Map, Symbol, Vec,
 };
@@ -28,6 +29,7 @@ use soroban_sdk::{
 pub const SCHEMA_VERSION: u32 = 1;
 
 const MAX_AMOUNT: i128 = i128::MAX / 2;
+pub const REPAYMENT_APPROVAL_THRESHOLD: i128 = 10_000_000_000i128;
 
 /// Maximum number of invoices that can be net-settled in a single transaction.
 /// Enforced to prevent DoS via unbounded iteration (6 nested loops over invoice_ids).
@@ -63,9 +65,6 @@ pub enum FinancingPoolError {
     SaleNotFound = 18,
     Unauthorized = 19,
     UpgradeTimelockNotElapsed = 20,
-    ApprovalPending = 21,
-    ApprovalThresholdNotMet = 22,
-    GracePeriodActive = 23,
     // PositionShare (#563)
     ShareNotFound = 21,
     InvalidShareAmount = 22,
@@ -81,9 +80,10 @@ pub enum FinancingPoolError {
     DisputeNotOpen = 31,
     // Partial repayment (#566)
     PartialRepayInvalid = 32,
-    // Loop bound enforcement (DoS protection)
-    BatchSizeExceeded = 33,
-    TooManyInvestors = 34,
+    // Multi-sig repayment & grace period (#580, #581)
+    ApprovalPending = 33,
+    ApprovalThresholdNotMet = 34,
+    GracePeriodActive = 35,
 }
 
 impl From<CommonError> for FinancingPoolError {
@@ -142,8 +142,21 @@ pub enum DataKey {
     ShareSaleOffer(u64, Address, u32),
     /// Dispute resolution contract address (#565).
     DisputeResolution,
-    /// Instance schema version; absent on deployments predating this framework.
-    SchemaVersion,
+    /// Authorized marketplace contract (wired for auto-compound reinvestment, #578)
+    Marketplace,
+    /// Per-investor auto-compound preference, keyed by investor address (#578)
+    AutoCompound(Address),
+}
+
+/// Investor preference to auto-compound a matured position's payout into a
+/// target listing instead of withdrawing to the wallet (#578).
+#[contracttype]
+#[derive(Clone, Debug)]
+pub struct AutoCompoundPref {
+    pub enabled: bool,
+    /// The listing the payout should be reinvested into. Required (and only used)
+    /// when `enabled == true`; the investor must specify the target explicitly.
+    pub target_invoice: Option<u64>,
 }
 
 // ── Contract ──────────────────────────────────────────────────────────────────
@@ -396,6 +409,8 @@ impl FinancingPoolContract {
             .instance()
             .get(&DataKey::GracePeriod)
             .unwrap_or(0)
+    }
+
     /// Set the authorized marketplace contract address. Admin only.
     ///
     /// Used by `distribute_yield` to route auto-compounded payouts into a target
@@ -430,7 +445,7 @@ impl FinancingPoolContract {
         let pref = AutoCompoundPref { enabled, target_invoice };
         env.storage()
             .persistent()
-            .set(&DataKey::AutoCompound(investor), &pref);
+            .set(&DataKey::AutoCompound(investor.clone()), &pref);
         Self::bump_persistent(&env, &DataKey::AutoCompound(investor));
         Ok(())
     }
@@ -449,11 +464,11 @@ impl FinancingPoolContract {
     /// Returns the configured price oracle address. Lets other protocol
     /// contracts (e.g. marketplace, for cross-currency funding) reuse the
     /// same oracle instance instead of wiring a separate reference. (#449)
-    pub fn get_price_oracle(env: Env) -> Result<Address, KoraError> {
+    pub fn get_price_oracle(env: Env) -> Result<Address, FinancingPoolError> {
         env.storage()
             .instance()
             .get(&DataKey::PriceOracle)
-            .ok_or(KoraError::NotInitialized)
+            .ok_or(FinancingPoolError::NotInitialized)
     }
 
     /// Register an investor position for a funded invoice. Admin only.
@@ -774,7 +789,7 @@ impl FinancingPoolContract {
         let offer = ShareSaleOffer {
             seller: seller.clone(),
             invoice_id,
-            original_investor,
+            original_investor: original_investor.clone(),
             share_index,
             token,
             price,
@@ -1450,6 +1465,8 @@ impl FinancingPoolContract {
 
         Ok(())
     }
+
+    fn distribute_yield(
         env: &Env,
         invoice_id: u64,
         token: &Address,
@@ -1616,6 +1633,7 @@ impl FinancingPoolContract {
         let now = env.ledger().timestamp();
         if now < invoice.due_date + grace_period {
             return Err(FinancingPoolError::GracePeriodActive);
+        }
         if let Some(dr_contract) = env
             .storage()
             .instance()
@@ -1623,7 +1641,12 @@ impl FinancingPoolContract {
         {
             let dr_client =
                 kora_dispute_resolution::DisputeResolutionContractClient::new(&env, &dr_contract);
-            if dr_client.try_has_open_dispute(&invoice_id).unwrap_or(false) {
+            if dr_client
+                .try_has_open_dispute(&invoice_id)
+                .ok()
+                .and_then(|r| r.ok())
+                .unwrap_or(false)
+            {
                 return Err(FinancingPoolError::DisputeNotOpen);
             }
         }
@@ -1766,7 +1789,7 @@ impl FinancingPoolContract {
             return Err(FinancingPoolError::PoolAlreadyClosed);
         }
 
-        if approval.approvals.iter().any(|a| a == &approver) {
+        if approval.approvals.iter().any(|a| a == approver) {
             return Err(FinancingPoolError::AlreadyInitialized);
         }
 
@@ -2485,6 +2508,12 @@ impl FinancingPoolContract {
     }
 
     // ── Helpers ───────────────────────────────────────────────────────────────
+
+    fn bump_persistent(env: &Env, key: &DataKey) {
+        env.storage()
+            .persistent()
+            .extend_ttl(key, 518_400, 518_400);
+    }
 
     fn load_invoice(
         env: &Env,

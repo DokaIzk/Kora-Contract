@@ -1,5 +1,6 @@
-use soroban_sdk::xdr::ToXdr;
-use soroban_sdk::{contracttype, Address, Bytes, BytesN, Env, String};
+#![allow(unused)]
+
+use soroban_sdk::{contracttype, xdr::ToXdr, Address, Bytes, BytesN, Env, String};
 
 /// Ring-buffer capacity for on-chain audit log.
 pub const MAX_AUDIT_LOG_SIZE: u64 = 500;
@@ -54,7 +55,7 @@ pub enum AuditSource {
 }
 
 /// Canonical discriminant for every admin-gated operation across the protocol.
-#[contracttype]
+#[contracttype(export = false)]
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub enum AdminActionType {
     Pause,
@@ -84,6 +85,15 @@ pub enum AdminActionType {
     SetAccessControl,
     DeclareEmergency,
     RevokeEmergency,
+    SetReserveAllocation,
+    SetReserveCaller,
+    DisburseFromReserve,
+    ProposeTreasuryAction,
+    ApproveTreasuryAction,
+    ExecuteTreasuryAction,
+    ProposeRecipient,
+    ExecuteRecipient,
+    // ── RiskRegistry ─────────────────────────────────────────────────────────
     AddVerifier,
     RemoveVerifier,
     SuspendVerifier,
@@ -136,7 +146,7 @@ pub enum AdminActionType {
 // (Extension documented here; actual variant additions are in the original enum above.)
 
 /// A single entry in the on-chain admin audit log.
-#[contracttype]
+#[contracttype(export = false)]
 #[derive(Clone, Debug)]
 pub struct AdminAuditEntry {
     pub sequence: u64,
@@ -147,7 +157,3 @@ pub struct AdminAuditEntry {
     pub token: Option<Address>,
     pub amount: Option<i128>,
 }
-
-
-
-

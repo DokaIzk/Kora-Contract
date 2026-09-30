@@ -5,16 +5,21 @@ use kora_shared::{
     errors::KoraError,
     events,
     reentrancy::ReentrancyGuard,
-    types::{InvoiceStatus, Listing, RegistryParamKey, RiskTier},
-    validation::{bps_of_normalized, require_non_zero_amount, require_valid_fee_bps, require_within_max_amount, safe_add, safe_sub, UPGRADE_TIMELOCK_DELAY},
+    types::{Listing, MultisigConfig, ParameterKey, RiskTier},
+    validation::{
+        bps_of_normalized, require_non_zero_amount, require_valid_fee_bps,
+        require_within_max_amount, safe_add, safe_div, safe_mul, safe_sub, UPGRADE_TIMELOCK_DELAY,
+    },
 };
-use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, IntoVal, Vec};
-
-pub const SCHEMA_VERSION: u32 = 1;
+use soroban_sdk::{contract, contractimpl, contracttype, token, Address, Bytes, BytesN, Env, Symbol, Vec};
 
 // ~30 days in ledgers at ~5 s/ledger
 const PERSISTENT_TTL_THRESHOLD: u32 = 518_400;
 const PERSISTENT_TTL_BUMP: u32 = 518_400;
+
+/// Maximum number of allocations accepted by `fund_invoices_batch` in a single
+/// call, to keep per-transaction CPU/resource usage within Soroban limits. (#448)
+const MAX_BATCH_SIZE: u32 = 20;
 
 /// Default minimum contribution floor for `fund_invoice`, in a token's smallest unit.
 /// ~1 unit assuming a 7-decimal stablecoin (Stellar/Soroban's `STANDARD_DECIMALS`) —
@@ -70,8 +75,59 @@ pub enum DataKey {
     FeeContribution(u64, Address),
     /// Oracle currency symbol registered for a whitelisted token (#449).
     TokenCurrency(Address),
-    /// Instance schema version; absent on deployments predating this framework.
-    SchemaVersion,
+    /// Investor concentration cap (#435)
+    MaxInvestorShareBps,
+    /// Cumulative gross (pre-fee) contribution per investor per listing (#435)
+    GrossContribution(u64, Address),
+    /// Whether an investor address is accredited and allowed to fund listings (#436).
+    InvestorAccredited(Address),
+    /// Ordered Vec<Address> of unique investors who have funded a listing (#438).
+    ListingInvestors(u64),
+    /// Multisig-gated admin proposal by id (#10e0f82).
+    AdminProposal(u64),
+    /// Monotonic counter allocating the next admin proposal id (#10e0f82).
+    NextAdminProposalId,
+    /// Pending dependency-address update: DependencyUpdateProposal(field_ordinal) -> (new_address, proposed_at) (#445)
+    DependencyUpdateProposal(u32),
+}
+
+/// The five cross-contract dependency addresses marketplace relies on. (#445)
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum DependencyField {
+    InvoiceNft,
+    FinancingPool,
+    Treasury,
+    AccessControl,
+    RiskRegistry,
+}
+
+// ── Multisig-gated admin actions ─────────────────────────────────────────────
+
+/// A privileged marketplace action that can be enacted through an access_control
+/// multisig quorum instead of a single admin key.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub enum MarketplaceAction {
+    SetFeeBps(u32),
+    SetReferrerSplitBps(u32),
+    /// (risk tier ordinal, fee bps)
+    SetTierFeeBps(u32, u32),
+    WhitelistToken(Address),
+    RemoveTokenWhitelist(Address),
+    ProposeUpgrade(BytesN<32>),
+    ExecuteUpgrade,
+}
+
+/// A pending multisig proposal for a `MarketplaceAction`.
+#[contracttype]
+#[derive(Clone, Debug, Eq, PartialEq)]
+pub struct AdminProposal {
+    pub id: u64,
+    pub action: MarketplaceAction,
+    pub approvals: Vec<Address>,
+    pub executed: bool,
+    pub created_at: u64,
 }
 
 // ── Config struct ─────────────────────────────────────────────────────────────
@@ -525,6 +581,9 @@ impl MarketplaceContract {
         Self::require_debtor_verified(&env, &invoice.debtor_hash)?;
         Self::check_debtor_cap(&env, &invoice.debtor_hash, asking_price)?;
 
+        // === #743: Circuit Breaker gate ===
+        Self::require_circuit_breaker_not_tripped(&env, &invoice.debtor_hash, &invoice.risk_tier)?;
+
         // Enforce the protocol-wide per-token exposure cap (#447) before mutating
         // NFT/listing state, so a rejected listing leaves no partial side effects.
         Self::add_token_exposure(&env, &token, asking_price)?;
@@ -540,6 +599,7 @@ impl MarketplaceContract {
             funded_amount: 0,
             funding_deadline,
             is_active: true,
+            bidding_deadline: None,
         };
         env.storage()
             .persistent()
@@ -688,20 +748,39 @@ impl MarketplaceContract {
         let nft_client = kora_invoice_nft::InvoiceNftContractClient::new(&env, &config.invoice_nft);
         let invoice = nft_client.get_invoice(&invoice_id);
 
+        // === #743: Circuit Breaker gate ===
+        Self::require_circuit_breaker_not_tripped(env, &invoice.debtor_hash, &invoice.risk_tier)?;
+
         // Determine the amount that will be credited (after conversion if needed)
         let token_client = token::Client::new(&env, &listing.token);
         let token_decimals = token_client.decimals();
         let token_symbol = token_client.symbol();
-        let credited_amount = if token_symbol != invoice.currency {
-            let oracle_client = kora_price_oracle::PriceOracleContractClient::new(&env, &config.price_oracle);
+        let token_currency: Symbol = env
+            .storage()
+            .persistent()
+            .get(&DataKey::TokenCurrency(listing.token.clone()))
+            .unwrap_or_else(|| {
+                let mut buf = [0u8; 32];
+                let len = (token_symbol.len() as usize).min(32);
+                token_symbol.copy_into_slice(&mut buf[..len]);
+                if let Ok(s) = core::str::from_utf8(&buf[..len]) {
+                    Symbol::new(&env, s)
+                } else {
+                    invoice.currency.clone()
+                }
+            });
+
+        let credited_amount = if token_currency != invoice.currency {
+            let oracle_client =
+                kora_price_oracle::PriceOracleContractClient::new(&env, &config.price_oracle);
             let invoice_decimals = 7u32;
             oracle_client.convert_with_decimals(
                 &amount,
-                &token_symbol,
+                &token_currency,
                 &invoice.currency,
                 &token_decimals,
                 &invoice_decimals,
-            )?
+            )
         } else {
             amount
         };
@@ -1326,7 +1405,7 @@ impl MarketplaceContract {
     /// Iterates the `ListingInvestors` index and sums `Contribution` entries,
     /// providing an on-chain reconciliation view that should equal
     /// `listing.funded_amount` minus any fees collected.
-    pub fn get_total_outstanding_contribution(env: Env, invoice_id: u64) -> i128 {
+    pub fn get_outstanding_contribution(env: Env, invoice_id: u64) -> i128 {
         let investors: Vec<Address> = env
             .storage()
             .persistent()
@@ -1377,115 +1456,29 @@ impl MarketplaceContract {
         Ok(())
     }
 
-    fn debtor_exposure(env: &Env, debtor_hash: &Bytes) -> i128 {
-        env.storage().persistent().get(&DataKey::DebtorExposure(debtor_hash.clone())).unwrap_or(0)
+    fn risk_tier_to_symbol(env: &Env, tier: &RiskTier) -> Symbol {
+        match tier {
+            RiskTier::AAA => Symbol::new(env, "AAA"),
+            RiskTier::AA => Symbol::new(env, "AA"),
+            RiskTier::A => Symbol::new(env, "A"),
+            RiskTier::B => Symbol::new(env, "B"),
+            RiskTier::C => Symbol::new(env, "C"),
+        }
     }
 
-    fn check_debtor_cap(env: &Env, debtor_hash: &Bytes, additional: i128) -> Result<(), KoraError> {
-        Self::reconcile_debtor(env, debtor_hash)?;
-        let mut any_cap = false;
-        for ordinal in 0..5 {
-            let cap: i128 = env.storage().instance()
-                .get(&DataKey::TierDebtorCap(ordinal)).unwrap_or(0);
-            any_cap |= cap > 0;
-        }
-        if !any_cap { return Ok(()); }
+    /// Enforce cross-contract circuit breaker gate (#743).
+    /// Rejects operations if the debtor or the risk tier is currently paused.
+    fn require_circuit_breaker_not_tripped(
+        env: &Env,
+        debtor_hash: &Bytes,
+        tier: &RiskTier,
+    ) -> Result<(), KoraError> {
         let config = Self::load_config(env)?;
         let rr = kora_risk_registry::RiskRegistryContractClient::new(env, &config.risk_registry);
-        let tier = match rr.get_debtor_risk_tier(debtor_hash) {
-            Some(tier) => tier,
-            // Once a tier limit is configured, missing scores cannot evade it.
-            None => return Err(KoraError::ComplianceNotAttested),
-        };
-        let cap: i128 = env.storage().instance()
-            .get(&DataKey::TierDebtorCap(Self::tier_ordinal(&tier))).unwrap_or(0);
-        let projected = safe_add(Self::debtor_exposure(env, debtor_hash), additional)?;
-        if cap > 0 && projected > cap { return Err(KoraError::ExceedsFundingTarget); }
-        Ok(())
-    }
-
-    fn add_debtor_exposure(
-        env: &Env, debtor_hash: &Bytes, invoice_id: u64, amount: i128,
-    ) -> Result<(), KoraError> {
-        Self::check_debtor_cap(env, debtor_hash, amount)?;
-        let total_key = DataKey::DebtorExposure(debtor_hash.clone());
-        let invoice_key = DataKey::InvoiceDebtorExposure(invoice_id);
-        let before: i128 = env.storage().persistent().get(&invoice_key).unwrap_or(0);
-        if before == 0 {
-            let ids_key = DataKey::DebtorInvoiceIds(debtor_hash.clone());
-            let mut ids: Vec<u64> = env.storage().persistent()
-                .get(&ids_key).unwrap_or_else(|| Vec::new(env));
-            // Bound the reconciliation cost per debtor.
-            if ids.len() >= 256 { return Err(KoraError::ExceedsFundingTarget); }
-            ids.push_back(invoice_id);
-            env.storage().persistent().set(&ids_key, &ids);
-            Self::bump_persistent(env, &ids_key);
+        let tier_sym = Self::risk_tier_to_symbol(env, tier);
+        if rr.is_debtor_paused(debtor_hash) || rr.is_tier_paused(&tier_sym) {
+            return Err(KoraError::CircuitBreakerTripped);
         }
-        env.storage().persistent().set(&invoice_key, &safe_add(before, amount)?);
-        Self::bump_persistent(env, &invoice_key);
-        env.storage().persistent().set(&total_key,
-            &safe_add(Self::debtor_exposure(env, debtor_hash), amount)?);
-        Self::bump_persistent(env, &total_key);
-        Ok(())
-    }
-
-    fn remove_debtor_exposure(
-        env: &Env, debtor_hash: &Bytes, invoice_id: u64, amount: i128,
-    ) -> Result<(), KoraError> {
-        let invoice_key = DataKey::InvoiceDebtorExposure(invoice_id);
-        let before: i128 = env.storage().persistent().get(&invoice_key).unwrap_or(0);
-        // Listings funded before this ledger was introduced have no tracked exposure.
-        if before == 0 { return Ok(()); }
-        let decrease = amount.min(before);
-        let after = safe_sub(before, decrease)?;
-        let total_key = DataKey::DebtorExposure(debtor_hash.clone());
-        env.storage().persistent().set(&total_key,
-            &Self::debtor_exposure(env, debtor_hash).saturating_sub(decrease));
-        Self::bump_persistent(env, &total_key);
-        if after == 0 {
-            env.storage().persistent().remove(&invoice_key);
-            let ids_key = DataKey::DebtorInvoiceIds(debtor_hash.clone());
-            let mut ids: Vec<u64> = env.storage().persistent()
-                .get(&ids_key).unwrap_or_else(|| Vec::new(env));
-            if let Some(index) = ids.first_index_of(invoice_id) { ids.remove(index); }
-            env.storage().persistent().set(&ids_key, &ids);
-            Self::bump_persistent(env, &ids_key);
-        } else {
-            env.storage().persistent().set(&invoice_key, &after);
-            Self::bump_persistent(env, &invoice_key);
-        }
-        Ok(())
-    }
-
-    fn reconcile_debtor(env: &Env, debtor_hash: &Bytes) -> Result<(), KoraError> {
-        let ids_key = DataKey::DebtorInvoiceIds(debtor_hash.clone());
-        let ids: Vec<u64> = env.storage().persistent()
-            .get(&ids_key).unwrap_or_else(|| Vec::new(env));
-        if ids.is_empty() { return Ok(()); }
-        let config = Self::load_config(env)?;
-        let nft = kora_invoice_nft::InvoiceNftContractClient::new(env, &config.invoice_nft);
-        let mut live = Vec::new(env);
-        let total_key = DataKey::DebtorExposure(debtor_hash.clone());
-        let mut total = Self::debtor_exposure(env, debtor_hash);
-        for id in ids.iter() {
-            let terminal = match nft.try_get_invoice(&id) {
-                Ok(Ok(invoice)) => invoice.debtor_hash == *debtor_hash
-                    && matches!(invoice.status, InvoiceStatus::Repaid | InvoiceStatus::Defaulted),
-                _ => false,
-            };
-            if terminal {
-                let key = DataKey::InvoiceDebtorExposure(id);
-                let recorded: i128 = env.storage().persistent().get(&key).unwrap_or(0);
-                total = total.saturating_sub(recorded);
-                env.storage().persistent().remove(&key);
-            } else {
-                live.push_back(id);
-            }
-        }
-        env.storage().persistent().set(&total_key, &total);
-        Self::bump_persistent(env, &total_key);
-        env.storage().persistent().set(&ids_key, &live);
-        Self::bump_persistent(env, &ids_key);
         Ok(())
     }
 
@@ -2019,6 +2012,11 @@ impl MarketplaceContract {
             .instance()
             .get(&DataKey::RiskRegistry)
             .ok_or(KoraError::NotInitialized)?;
+        let price_oracle: Address = env
+            .storage()
+            .instance()
+            .get(&DataKey::PriceOracle)
+            .ok_or(KoraError::NotInitialized)?;
 
         let config = MarketplaceConfig {
             admin,
@@ -2026,6 +2024,7 @@ impl MarketplaceContract {
             financing_pool,
             treasury,
             access_control,
+            price_oracle,
             risk_registry,
             fee_bps,
             referrer_split_bps: 0,
@@ -2253,12 +2252,25 @@ mod tests {
 
         let mp_id = env.register_contract(None, MarketplaceContract);
         let mp = MarketplaceContractClient::new(&env, &mp_id);
-        mp.initialize(&admin, &nft_id, &pool_id, &treasury, &mp_ac, &registry, &50u32, &0u32);
+        mp.initialize(
+            &admin,
+            &nft_id,
+            &pool_id,
+            &treasury,
+            &ac_id,
+            &oracle,
+            &registry,
+            &50u32,
+            &0u32,
+        );
 
         // Register marketplace and pool as authorized callers on the NFT contract (#209)
         nft.set_authorized_callers(&admin, &mp_id, &pool_id);
 
-        let token = Address::generate(&env);
+        let token_admin = Address::generate(&env);
+        let token = env
+            .register_stellar_asset_contract_v2(token_admin.clone())
+            .address();
         mp.propose_token_whitelist(&admin, &token);
         env.ledger().set(LedgerInfo {
             timestamp: 1_700_000_000 + UPGRADE_TIMELOCK_DELAY + 1,

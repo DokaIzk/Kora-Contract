@@ -40,6 +40,8 @@ pub fn run(data: &[u8]) {
                     &gen::small_u32(penalty, ptag),
                     &p.actor(oracle),
                     &gen::small_u32(max_bps, mtag),
+                    &86_400u64,
+                    &p.actor(admin),
                 );
             }
             Op::ReleaseFunds { marketplace, id, itag, token } => {

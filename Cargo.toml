@@ -16,8 +16,6 @@ members = [
     "contracts/tests",
     "contracts/xtask",
     "contracts/fuzz",
-    "contracts/governance",
-    "services/indexer",
 ]
 # contracts/fuzz/fuzz is the cargo-fuzz (libFuzzer, nightly) crate. It is built
 # only by `cargo fuzz`, never as part of the workspace.

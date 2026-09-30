@@ -86,6 +86,8 @@ kora-access-control = { path = "../access_control" }
 kora-price-oracle = { path = "../price_oracle" }
 kora-referral-rewards = { path = "../referral_rewards" }
 
-# ── Integration test targets ──────────────────────────────────────────────────
-# Each [[test]] entry wires a standalone .rs file in contracts/tests/ as a
-# named integration-test binary, making it discoverable by `cargo test --workspace`.
+# ── Cross-contract auth fuzzing harness (Issue #610) ─────────────────────────
+[[test]]
+name = "auth_fuzzing"
+path = "auth_fuzzing.rs"
+

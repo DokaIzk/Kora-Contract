@@ -21,7 +21,7 @@
 
 use kora_shared::{
     audit::{AdminActionType, AdminAuditEntry, AuditSource, MAX_AUDIT_LOG_SIZE},
-    errors::CommonError,
+    errors::{CommonError, KoraError},
     events,
     reentrancy::ReentrancyGuard,
     types::{AmountBounds, Invoice, InvoiceStatus, ProtocolConfig, RiskTier},
@@ -65,17 +65,8 @@ pub enum InvoiceNftError {
     SMENotRegistered = 21,
     Unauthorized = 22,
     UpgradeTimelockNotElapsed = 23,
-    MigrationVersionMismatch = 24,
-    InvalidMigrationTarget = 25,
-}
-
-impl From<kora_shared::migration::MigrationError> for InvoiceNftError {
-    fn from(error: kora_shared::migration::MigrationError) -> Self {
-        match error {
-            kora_shared::migration::MigrationError::VersionMismatch => Self::MigrationVersionMismatch,
-            _ => Self::InvalidMigrationTarget,
-        }
-    }
+    MintRateLimitExceeded = 24,
+    InvalidParameterValue = 25,
 }
 
 impl From<CommonError> for InvoiceNftError {
@@ -95,12 +86,178 @@ impl From<CommonError> for InvoiceNftError {
     }
 }
 
-// ── TTL constants (~30 days at ~5s/ledger) ────────────────────────────────────
+impl From<InvoiceNftError> for KoraError {
+    fn from(e: InvoiceNftError) -> Self {
+        match e {
+            InvoiceNftError::AlreadyInitialized => KoraError::AlreadyInitialized,
+            InvoiceNftError::ArithmeticOverflow => KoraError::ArithmeticOverflow,
+            InvoiceNftError::BatchSizeExceeded => KoraError::BatchSizeExceeded,
+            InvoiceNftError::CreditLimitExceeded => KoraError::CreditLimitExceeded,
+            InvoiceNftError::CurrencyNotAllowed => KoraError::CurrencyNotAllowed,
+            InvoiceNftError::EmptyBytes => KoraError::EmptyBytes,
+            InvoiceNftError::EmptyString => KoraError::EmptyString,
+            InvoiceNftError::FieldTooLong => KoraError::FieldTooLong,
+            InvoiceNftError::InvalidAddress => KoraError::InvalidAddress,
+            InvoiceNftError::InvalidAmount => KoraError::InvalidAmount,
+            InvoiceNftError::InvalidDueDate => KoraError::InvalidDueDate,
+            InvoiceNftError::InvalidInvoiceStatus => KoraError::InvalidInvoiceStatus,
+            InvoiceNftError::InvalidRiskScore => KoraError::InvalidRiskScore,
+            InvoiceNftError::InvoiceNotFound => KoraError::InvoiceNotFound,
+            InvoiceNftError::NoUpgradeProposed => KoraError::NoUpgradeProposed,
+            InvoiceNftError::NotAdmin => KoraError::NotAdmin,
+            InvoiceNftError::NotInitialized => KoraError::NotInitialized,
+            InvoiceNftError::NotInvoiceOwner => KoraError::NotInvoiceOwner,
+            InvoiceNftError::ProtocolPaused => KoraError::ProtocolPaused,
+            InvoiceNftError::Reentrancy => KoraError::Reentrancy,
+            InvoiceNftError::SMENotRegistered => KoraError::SMENotRegistered,
+            InvoiceNftError::Unauthorized => KoraError::Unauthorized,
+            InvoiceNftError::UpgradeTimelockNotElapsed => KoraError::UpgradeTimelockNotElapsed,
+            InvoiceNftError::MintRateLimitExceeded => KoraError::MintRateLimitExceeded,
+            InvoiceNftError::InvalidParameterValue => KoraError::InvalidParameterValue,
+        }
+    }
+}
+
+impl From<KoraError> for InvoiceNftError {
+    fn from(e: KoraError) -> Self {
+        match e {
+            KoraError::AlreadyInitialized => InvoiceNftError::AlreadyInitialized,
+            KoraError::ArithmeticOverflow => InvoiceNftError::ArithmeticOverflow,
+            KoraError::BatchSizeExceeded => InvoiceNftError::BatchSizeExceeded,
+            KoraError::CreditLimitExceeded => InvoiceNftError::CreditLimitExceeded,
+            KoraError::CurrencyNotAllowed => InvoiceNftError::CurrencyNotAllowed,
+            KoraError::EmptyBytes => InvoiceNftError::EmptyBytes,
+            KoraError::EmptyString => InvoiceNftError::EmptyString,
+            KoraError::FieldTooLong => InvoiceNftError::FieldTooLong,
+            KoraError::InvalidAddress => InvoiceNftError::InvalidAddress,
+            KoraError::InvalidAmount => InvoiceNftError::InvalidAmount,
+            KoraError::InvalidDueDate => InvoiceNftError::InvalidDueDate,
+            KoraError::InvalidInvoiceStatus => InvoiceNftError::InvalidInvoiceStatus,
+            KoraError::InvalidRiskScore => InvoiceNftError::InvalidRiskScore,
+            KoraError::InvoiceNotFound => InvoiceNftError::InvoiceNotFound,
+            KoraError::NoUpgradeProposed => InvoiceNftError::NoUpgradeProposed,
+            KoraError::NotAdmin => InvoiceNftError::NotAdmin,
+            KoraError::NotInitialized => InvoiceNftError::NotInitialized,
+            KoraError::NotInvoiceOwner => InvoiceNftError::NotInvoiceOwner,
+            KoraError::ProtocolPaused => InvoiceNftError::ProtocolPaused,
+            KoraError::Reentrancy => InvoiceNftError::Reentrancy,
+            KoraError::SMENotRegistered => InvoiceNftError::SMENotRegistered,
+            KoraError::Unauthorized => InvoiceNftError::Unauthorized,
+            KoraError::UpgradeTimelockNotElapsed => InvoiceNftError::UpgradeTimelockNotElapsed,
+            KoraError::MintRateLimitExceeded => InvoiceNftError::MintRateLimitExceeded,
+            KoraError::InvalidParameterValue => InvoiceNftError::InvalidParameterValue,
+            _ => InvoiceNftError::InvalidAmount,
+        }
+    }
+}
+
+impl PartialEq<KoraError> for InvoiceNftError {
+    fn eq(&self, other: &KoraError) -> bool {
+        Into::<KoraError>::into(*self) == *other
+    }
+}
+
+impl PartialEq<InvoiceNftError> for KoraError {
+    fn eq(&self, other: &InvoiceNftError) -> bool {
+        *self == Into::<KoraError>::into(*other)
+    }
+}
+
+// ── TTL constants (~30 days at ~5s/ledger) ───────────────────────────────────
 const PERSISTENT_TTL_THRESHOLD: u32 = 518_400;
 const PERSISTENT_TTL_BUMP: u32 = 518_400;
 
 /// Maximum invoice IDs returned per `get_sme_invoice_ids` page.
 const MAX_SME_INVOICE_PAGE: u32 = 100;
+
+// ── Storage Keys ────────────────────────────────────────────────────────────
+//
+// Storage versioning: The contract uses a MigrationVersion key to track schema changes.
+// Current version: 2 (Invoice includes `metadata_hash` and `notes`)
+//
+// Variants:
+// - Invoice(u64): Stores individual Invoice structs by ID (persistent)
+// - NextId: Stores the next invoice ID to mint (instance)
+// - Admin: Stores admin address (instance)
+// - AccessControl: Stores access control contract address (instance)
+// - MigrationVersion: Tracks current schema version for upgrade safety (instance)
+
+/// Storage key variants for the invoice NFT contract.
+///
+/// - `Invoice(u64)` — Maps invoice ID to the full `Invoice` struct (persistent)
+/// - `NextId` — Stores the next invoice ID to be allocated (instance)
+/// - `Admin` — Stores the contract admin address (instance)
+/// - `AccessControl` — Stores the access control contract address (instance)
+/// - `InvoiceCount` — Stores total invoice count for metrics (instance)
+/// - `MigrationVersion` — Tracks current schema version for upgrade safety (instance)
+/// - `CurrencyAllowlist(Symbol)` — Marks a currency symbol as allowed (persistent)
+#[contracttype]
+pub enum DataKey {
+    /// Versioned invoice storage: Invoice(id) stores Invoice struct
+    Invoice(u64),
+    /// Instance key: tracks next invoice ID to assign
+    NextId,
+    /// Instance key: admin address for privileged operations
+    Admin,
+    /// Instance key: pending new admin address (two-step transfer)
+    PendingAdmin,
+    /// Instance key: access control contract address for pause checks
+    AccessControl,
+    /// Instance key: current schema migration version (starts at 1)
+    MigrationVersion,
+    /// Pending upgrade proposal: (wasm_hash, proposed_at_timestamp).
+    UpgradeProposal,
+    /// Instance key: authorized marketplace contract address
+    Marketplace,
+    /// Instance key: authorized financing pool contract address
+    FinancingPool,
+    /// Instance key: authorized risk registry contract address
+    RiskRegistry,
+    /// Persistent: aggregate exposure (i128) for an investor address
+    OutstandingExposure(Address),
+    /// Persistent: marks a currency symbol as allowed for invoices
+    CurrencyAllowlist(Symbol),
+    /// Persistent bool: true when this invoice is individually frozen by an admin.
+    /// Checked by marketplace.fund_invoice and financing_pool.repay in addition
+    /// to the protocol-wide pause, enabling targeted freeze of disputed invoices.
+    InvoiceFrozen(u64),
+    /// Instance key: protocol-wide configuration (fee_bps, max_risk_score, etc).
+    /// Defaults apply when unset (see `get_protocol_config`).
+    ProtocolConfig,
+    /// Persistent: an open or resolved metadata-hash dispute for an invoice.
+    MetadataDispute(u64),
+    /// Persistent: bounded ring-buffer history of prior IPFS CIDs for an invoice.
+    MetadataCidHistory(u64),
+    /// Instance key: next write position in the admin audit ring buffer.
+    AuditLogHead,
+    /// Instance key: total admin actions ever recorded (monotonic).
+    AuditLogTotal,
+    /// Persistent: an audit log entry at ring-buffer position `n`.
+    AuditEntry(u64),
+    /// Per-risk-tier face-value bounds for invoice minting/listing.
+    AmountBounds(kora_shared::types::RiskTier),
+    /// Persistent: Vec<u64> of invoice IDs minted by this SME, in mint order.
+    /// Appended to in mint_invoice/mint_invoices_batch, pruned in withdraw_invoice.
+    SmeInvoiceIds(Address),
+    /// Instance key: monotonic counter allocating the next batch-mint correlation ID.
+    NextBatchId,
+    /// Instance key: `MintRateLimit` config. Absent means minting is unthrottled,
+    /// preserving pre-existing behaviour for deployments that never configure it.
+    MintRateLimit,
+    /// Persistent: `(window_start_ts, mints_used)` rolling mint window for an SME.
+    SmeMintWindow(Address),
+}
+
+/// A dispute raised against an invoice's committed `metadata_hash`.
+#[contracttype]
+#[derive(Clone)]
+pub struct MetadataDispute {
+    pub challenger: Address,
+    pub evidence_hash: Bytes,
+    pub raised_at: u64,
+    pub resolved: bool,
+    pub upheld: bool,
+}
 
 /// Maximum number of historical metadata CID entries retained per invoice.
 pub const MAX_METADATA_CID_HISTORY: u32 = 20;
@@ -442,68 +599,78 @@ impl InvoiceNftContract {
         env.storage().instance().get(&DataKey::AmountBounds(tier))
     }
 
-    // ── Mint rate limit ───────────────────────────────────────────────────────
-
-    pub fn set_mint_rate_limit(env: Env, admin: Address, max_mints: u32, window_secs: u64) -> Result<(), InvoiceNftError> {
+    /// Configure the per-SME mint rate limit. Admin only.
+    ///
+    /// Setting `max_mints` or `window_secs` to zero is rejected; unthrottled
+    /// minting is achieved by leaving the key unset, preserving existing
+    /// behavior until an admin opts in.
+    ///
+    /// **Errors:**
+    /// - `InvoiceNftError::NotAdmin` — Caller is not the admin.
+    /// - `InvoiceNftError::InvalidParameterValue` — `max_mints` or `window_secs` is zero.
+    pub fn set_mint_rate_limit(
+        env: Env,
+        admin: Address,
+        max_mints: u32,
+        window_secs: u64,
+    ) -> Result<(), InvoiceNftError> {
         admin.require_auth();
         Self::require_admin(&env, &admin)?;
         if max_mints == 0 || window_secs == 0 {
             return Err(InvoiceNftError::InvalidParameterValue);
         }
-        env.storage().instance().set(&DataKey::MintRateLimit, &MintRateLimit { max_mints, window_secs });
+        env.storage().instance().set(
+            &DataKey::MintRateLimit,
+            &MintRateLimit {
+                max_mints,
+                window_secs,
+            },
+        );
+        Self::append_audit_entry(&env, &admin, AdminActionType::InvoiceNftSetMintRateLimit);
         Ok(())
     }
 
+    /// Return the configured per-SME mint rate limit, or `None` when unthrottled.
     pub fn get_mint_rate_limit(env: Env) -> Option<MintRateLimit> {
         env.storage().instance().get(&DataKey::MintRateLimit)
     }
 
-    /// Returns `(window_start_ts, mints_used)` for an SME's current window.
+    /// Return `(window_start_ts, mints_used)` for an SME's current mint window.
     pub fn get_sme_mint_window(env: Env, sme: Address) -> (u64, u32) {
         env.storage()
             .persistent()
-            .get::<DataKey, (u64, u32)>(&DataKey::SmeMintWindow(sme))
+            .get(&DataKey::SmeMintWindow(sme))
             .unwrap_or((0u64, 0u32))
     }
 
-    // ── Two-step admin transfer ───────────────────────────────────────────────
-
-    pub fn propose_admin(env: Env, admin: Address, new_admin: Address) -> Result<(), InvoiceNftError> {
-        admin.require_auth();
-        Self::require_admin(&env, &admin)?;
-        kora_shared::validation::require_not_self(&env, &new_admin)?;
-        kora_shared::validation::require_distinct(&admin, &new_admin)?;
-        env.storage().instance().set(&DataKey::PendingAdmin, &new_admin);
-        Ok(())
-    }
-
-    pub fn accept_admin(env: Env, new_admin: Address) -> Result<(), InvoiceNftError> {
-        new_admin.require_auth();
-        let pending: Address = env
-            .storage()
-            .instance()
-            .get(&DataKey::PendingAdmin)
-            .ok_or(InvoiceNftError::NoPendingAdminProposal)?;
-        if pending != new_admin {
-            return Err(InvoiceNftError::NotPendingAdmin);
-        }
-        env.storage().instance().set(&DataKey::Admin, &new_admin);
-        env.storage().instance().remove(&DataKey::PendingAdmin);
-        Ok(())
-    }
-
-    pub fn cancel_admin_proposal(env: Env, admin: Address) -> Result<(), InvoiceNftError> {
-        admin.require_auth();
-        Self::require_admin(&env, &admin)?;
-        if !env.storage().instance().has(&DataKey::PendingAdmin) {
-            return Err(InvoiceNftError::NoPendingAdminProposal);
-        }
-        env.storage().instance().remove(&DataKey::PendingAdmin);
-        Ok(())
-    }
-
-    // ── Minting ───────────────────────────────────────────────────────────────
-
+    /// Mint a new invoice NFT. Caller must be a verified SME.
+    ///
+    /// **Parameters:**
+    /// - `sme` — The SME address minting the invoice (must sign).
+    /// - `debtor_hash` — SHA-256 hash of debtor PII (max `MAX_DEBTOR_HASH_LEN` bytes). PII stays off-chain.
+    /// - `amount` — Face value in stroops (7 decimals). Must be > 0.
+    /// - `currency` — Token symbol (e.g. `USDC`, `EURC`).
+    /// - `due_date` — Unix timestamp; must be strictly in the future.
+    /// - `ipfs_cid` — CIDv0 or CIDv1 of the full invoice document on IPFS (max 128 bytes).
+    /// - `risk_score` — Credit score 0–100 assigned by the verifier. Maps to a `RiskTier`.
+    /// - `notes` — Optional free-text memo (schema v2; `None` is fine).
+    ///
+    /// **Returns:** The allocated invoice ID (monotonically increasing from 1).
+    ///
+    /// **Errors:**
+    /// - `KoraError::ProtocolPaused` — Protocol is paused.
+    /// - `KoraError::InvalidAmount` — `amount` is zero, negative, or exceeds `credit_limit`.
+    /// - `KoraError::InvalidDueDate` — `due_date` is not in the future.
+    /// - `KoraError::InvalidRiskScore` — `risk_score` > 100.
+    /// - `KoraError::EmptyBytes` — `debtor_hash` is empty.
+    /// - `KoraError::EmptyString` — `ipfs_cid` is empty.
+    /// - `KoraError::FieldTooLong` — `debtor_hash` or `ipfs_cid` exceed their max lengths.
+    /// - `KoraError::InvalidAmount` — Adding this invoice would exceed the SME's credit limit.
+    /// - `KoraError::Reentrancy` — Reentrancy guard triggered.
+    ///
+    /// **Security:** Requires `sme.require_auth()`. The protocol must not be paused.
+    /// If a `risk_registry` is wired up, the SME's outstanding exposure is checked against
+    /// their pre-approved credit limit before minting.
     pub fn mint_invoice(
         env: Env,
         sme: Address,
@@ -533,6 +700,8 @@ impl InvoiceNftContract {
         require_max_length_bytes(&debtor_hash, MAX_DEBTOR_HASH_LEN)?;
         require_non_empty_string(&ipfs_cid)?;
         require_max_length_string(&ipfs_cid, MAX_IPFS_CID_LEN)?;
+
+        Self::consume_mint_quota(&env, &sme, 1)?;
 
         let outstanding: i128 = env
             .storage()
@@ -675,7 +844,9 @@ impl InvoiceNftContract {
             let new_exposure = outstanding
                 .checked_add(exposure_delta)
                 .ok_or(InvoiceNftError::ArithmeticOverflow)?;
-            env.storage().persistent().set(&DataKey::OutstandingExposure(sme.clone()), &new_exposure);
+            env.storage()
+                .persistent()
+                .set(&DataKey::OutstandingExposure(sme.clone()), &new_exposure);
         }
         Self::append_sme_invoice_ids(&env, &sme, &ids);
         if !ids.is_empty() {
@@ -720,7 +891,7 @@ impl InvoiceNftContract {
         if hot.status != InvoiceStatus::Created {
             return Err(InvoiceNftError::InvalidInvoiceStatus);
         }
-        if hot.sme != sme {
+        if invoice.sme != sme {
             return Err(InvoiceNftError::Unauthorized);
         }
 
@@ -772,7 +943,8 @@ impl InvoiceNftContract {
             .persistent()
             .get(&history_key)
             .unwrap_or_else(|| Vec::new(&env));
-        if history.len() >= MAX_METADATA_CID_HISTORY as u64 {
+
+        if history.len() >= capacity {
             history.remove(0);
         }
         history.push_back(cold.ipfs_cid.clone());
@@ -802,7 +974,7 @@ impl InvoiceNftContract {
         if hot.status != InvoiceStatus::Created {
             return Err(InvoiceNftError::InvalidInvoiceStatus);
         }
-        if hot.sme != sme {
+        if invoice.sme != sme {
             return Err(InvoiceNftError::Unauthorized);
         }
 
@@ -1342,33 +1514,30 @@ impl InvoiceNftContract {
             .unwrap_or(false)
     }
 
-    // ── Audit log ─────────────────────────────────────────────────────────────
+    // ── Helpers ──────────────────────────────────────────────────────────────
 
-    pub fn get_audit_log(env: Env, page: u32, page_size: u32) -> Vec<AdminAuditEntry> {
-        let page_size = (page_size.max(1).min(50)) as u64;
-        let total: u64 = env.storage().instance().get(&DataKey::AuditLogTotal).unwrap_or(0);
-        let head: u64 = env.storage().instance().get(&DataKey::AuditLogHead).unwrap_or(0);
-        let stored = total.min(MAX_AUDIT_LOG_SIZE);
-        let skip = (page as u64).saturating_mul(page_size);
-        let mut results = Vec::new(&env);
-        let mut i: u64 = 0;
-        while i < page_size {
-            let offset = skip + i;
-            if offset >= stored { break; }
-            let pos = (head + MAX_AUDIT_LOG_SIZE - 1 - offset) % MAX_AUDIT_LOG_SIZE;
-            if let Some(entry) = env
-                .storage()
-                .persistent()
-                .get::<DataKey, AdminAuditEntry>(&DataKey::AuditEntry(pos))
-            {
-                results.push_back(entry);
-            }
-            i += 1;
-        }
-        results
-    }
+    /// Append one entry to the ring-buffer admin audit log and emit the canonical event.
+    fn append_audit_entry(env: &Env, actor: &Address, action: AdminActionType) {
+        let total: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AuditLogTotal)
+            .unwrap_or(0);
+        let head: u64 = env
+            .storage()
+            .instance()
+            .get(&DataKey::AuditLogHead)
+            .unwrap_or(0);
 
-    // ── Private helpers ───────────────────────────────────────────────────────
+        let entry = AdminAuditEntry {
+            sequence: total,
+            timestamp: env.ledger().timestamp(),
+            actor: actor.clone(),
+            action,
+            source: AuditSource::InvoiceNft,
+            token: None,
+            amount: None,
+        };
 
     fn load_hot(env: &Env, id: u64) -> Result<InvoiceHot, InvoiceNftError> {
         env.storage()
@@ -1392,6 +1561,18 @@ impl InvoiceNftContract {
             .ok_or(InvoiceNftError::NotInitialized)?;
         if &admin != caller {
             return Err(InvoiceNftError::NotAdmin);
+        }
+        Ok(())
+    }
+
+    fn require_allowed_currency(env: &Env, currency: &Symbol) -> Result<(), InvoiceNftError> {
+        let allowed: bool = env
+            .storage()
+            .persistent()
+            .get(&DataKey::CurrencyAllowlist(currency.clone()))
+            .unwrap_or(false);
+        if !allowed {
+            return Err(InvoiceNftError::CurrencyNotAllowed);
         }
         Ok(())
     }
@@ -1424,50 +1605,39 @@ impl InvoiceNftContract {
         env.storage().persistent().extend_ttl(key, PERSISTENT_TTL_THRESHOLD, PERSISTENT_TTL_BUMP);
     }
 
-    fn append_audit_entry(env: &Env, actor: &Address, action: AdminActionType) {
-        let total: u64 = env.storage().instance().get(&DataKey::AuditLogTotal).unwrap_or(0);
-        let head: u64 = env.storage().instance().get(&DataKey::AuditLogHead).unwrap_or(0);
-        let entry = AdminAuditEntry {
-            sequence: total,
-            timestamp: env.ledger().timestamp(),
-            actor: actor.clone(),
-            action,
-            source: AuditSource::InvoiceNft,
+    /// Charge `count` mints against `sme`'s rolling rate-limit window.
+    ///
+    /// A batch charges one unit per invoice, so a batch of N counts as N. The
+    /// window is a fixed-start window: it resets only once `window_secs` has
+    /// fully elapsed since the first mint in the window.
+    fn consume_mint_quota(env: &Env, sme: &Address, count: u32) -> Result<(), InvoiceNftError> {
+        let cfg: MintRateLimit = match env.storage().instance().get(&DataKey::MintRateLimit) {
+            Some(cfg) => cfg,
+            None => return Ok(()),
         };
-        env.storage().persistent().set(&DataKey::AuditEntry(head), &entry);
-        Self::bump_persistent(env, &DataKey::AuditEntry(head));
-        events::admin_action_audited(env, &entry);
-        let next_head = (head + 1) % MAX_AUDIT_LOG_SIZE;
-        env.storage().instance().set(&DataKey::AuditLogHead, &next_head);
-        env.storage().instance().set(&DataKey::AuditLogTotal, &(total + 1));
-    }
 
-    fn consume_mint_quota(env: &Env, sme: &Address, count: usize) -> Result<(), InvoiceNftError> {
-        let limit: MintRateLimit = match env.storage().instance().get(&DataKey::MintRateLimit) {
-            Some(l) => l,
-            None => return Ok(()), // unthrottled
-        };
         let now = env.ledger().timestamp();
         let key = DataKey::SmeMintWindow(sme.clone());
-        let (window_start, mints_used): (u64, u32) = env
+        let (start, used): (u64, u32) = env
             .storage()
             .persistent()
             .get(&key)
             .unwrap_or((now, 0u32));
 
-        let (window_start, mints_used) = if now >= window_start + limit.window_secs {
+        let (start, used) = if now.saturating_sub(start) >= cfg.window_secs {
             (now, 0u32)
         } else {
-            (window_start, mints_used)
+            (start, used)
         };
 
-        let new_mints = mints_used
-            .checked_add(count as u32)
+        let new_used = used
+            .checked_add(count)
             .ok_or(InvoiceNftError::ArithmeticOverflow)?;
-        if new_mints > limit.max_mints {
+        if new_used > cfg.max_mints {
             return Err(InvoiceNftError::MintRateLimitExceeded);
         }
-        env.storage().persistent().set(&key, &(window_start, new_mints));
+
+        env.storage().persistent().set(&key, &(start, new_used));
         Self::bump_persistent(env, &key);
         Ok(())
     }
@@ -2196,15 +2366,51 @@ mod tests {
     #[test]
     fn test_set_risk_registry_emits_audit_entry() {
         let (env, admin, client) = setup();
-        let rr = Address::generate(&env);
-        client.set_risk_registry(&admin, &rr);
-        let log = client.get_audit_log(&0u32, &10u32);
-        assert_eq!(log.len(), 1);
-        let entry = log.get(0).unwrap();
-        assert_eq!(entry.action, AdminActionType::InvoiceNftSetRiskRegistry);
-        assert_eq!(entry.actor, admin);
-        assert_eq!(entry.source, AuditSource::InvoiceNft);
-        assert_eq!(entry.sequence, 0);
+        let config = ProtocolConfig {
+            fee_bps: 0,
+            late_penalty_bps: 0,
+            max_risk_score: 70,
+            min_funding_period: 0,
+        };
+        client.set_protocol_config(&admin, &config);
+        assert_eq!(client.get_protocol_config().max_risk_score, 70);
+
+        let sme = Address::generate(&env);
+        let debtor_hash = Bytes::from_slice(&env, &[1u8; 32]);
+        let cid = ipfs_cid(&env);
+        let due_date = env.ledger().timestamp() + 86_400 * 30;
+
+        let result = client.try_mint_invoice(
+            &sme, &debtor_hash, &1_000_000_000i128,
+            &Symbol::new(&env, "USDC"), &due_date, &cid, &80u32, &None,
+        );
+        assert_eq!(result.unwrap_err().unwrap(), KoraError::InvalidRiskScore);
+
+        let id = client.mint_invoice(
+            &sme, &debtor_hash, &1_000_000_000i128,
+            &Symbol::new(&env, "USDC"), &due_date, &cid, &60u32, &None,
+        );
+        assert_eq!(client.get_invoice(&id).risk_score, 60u32);
+    }
+
+    // ── #427: batch-mint correlation event ─────────────────────────────────────
+
+    fn batch_input(env: &Env, risk_score: u32) -> BatchInvoiceInput {
+        BatchInvoiceInput {
+            debtor_hash: Bytes::from_slice(env, &[9u8; 32]),
+            amount: 500_000_000i128,
+            currency: Symbol::new(env, "USDC"),
+            due_date: env.ledger().timestamp() + 86_400 * 30,
+            ipfs_cid: ipfs_cid(env),
+            risk_score,
+            notes: None,
+        }
+    }
+
+    /// Decodes the most recently published event's data tuple as (actor, u64, Vec<u64>, u64).
+    fn last_event_data(env: &Env) -> (Address, u64, Vec<u64>, u64) {
+        let (_contract, _topics, data) = env.events().all().last().unwrap();
+        soroban_sdk::TryFromVal::try_from_val(env, &data).unwrap()
     }
 
     #[test]
